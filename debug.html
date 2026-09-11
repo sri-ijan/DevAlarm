@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Focus Alarm - Debug</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #f1f5f9;
+      padding: 24px;
+      max-width: 640px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .hint { color: #94a3b8; font-size: 12px; margin-bottom: 20px; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #1e293b;
+      font-size: 13px;
+    }
+    .row .label { color: #94a3b8; }
+    .row .value { font-family: "SF Mono", monospace; }
+    .value.good { color: #4ade80; }
+    .value.bad { color: #f87171; }
+    .value.neutral { color: #facc15; }
+    .actions { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      padding: 8px 14px;
+      background: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button.danger { background: #dc2626; }
+    button.danger:hover { background: #b91c1c; }
+    .bar-track {
+      background: #1e293b;
+      border-radius: 6px;
+      height: 10px;
+      overflow: hidden;
+      margin: 6px 0 14px;
+    }
+    .bar-fill {
+      background: #22c55e;
+      height: 100%;
+      transition: width 0.3s;
+    }
+    #console-hint {
+      margin-top: 24px;
+      padding: 12px;
+      background: #1e293b;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.6;
+    }
+    code { background: #0f172a; padding: 1px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Focus Alarm — Debug</h1>
+  <p class="hint">Auto-refreshes every second. This shows what the background script is actually seeing right now.</p>
+  <p class="hint" style="color:#facc15;">⚠️ While THIS tab/window is the one you're looking at, it counts as the active tab (tracking pauses — it won't reset your progress, but it also can't show you another tab's live status). To watch a distracting site's status update in real time, open this debug page in a <b>separate window</b>, drag it to one side, then click into your other window (e.g. YouTube) to give that one focus — this window will keep refreshing without needing your click.</p>
+
+  <div class="row"><span class="label">Alarm status</span><span class="value" id="alarm-status">-</span></div>
+  <div class="row"><span class="label">Offscreen keepalive</span><span class="value" id="offscreen-status">-</span></div>
+  <div class="row"><span class="label">Last background tick</span><span class="value" id="last-tick">-</span></div>
+  <div class="row"><span class="label">Active tab</span><span class="value" id="active-tab">-</span></div>
+  <div class="row"><span class="label">Counts as distracting?</span><span class="value" id="is-distracting">-</span></div>
+  <div class="row"><span class="label">Idle right now?</span><span class="value" id="is-idle">-</span></div>
+  <div class="row"><span class="label">YouTube channel detected</span><span class="value" id="yt-channel">-</span></div>
+
+  <p class="hint">Accumulated distracted time vs threshold</p>
+  <div class="bar-track"><div class="bar-fill" id="progress-bar" style="width:0%"></div></div>
+  <div class="row"><span class="label">Accumulated / Threshold</span><span class="value" id="accumulated">-</span></div>
+
+  <div class="row"><span class="label">Snooze active?</span><span class="value" id="snooze-status">-</span></div>
+  <div class="row"><span class="label">Snoozes used this alarm</span><span class="value" id="snoozes-used">-</span></div>
+  <div class="row"><span class="label">Focus session</span><span class="value" id="focus-session">-</span></div>
+
+  <div class="actions">
+    <button id="force-tick-btn">Force tick now</button>
+    <button id="force-alarm-btn">Force trigger alarm</button>
+    <button id="reset-btn" class="danger">Reset all state</button>
+  </div>
+
+  <div id="console-hint">
+    Want the raw log line-by-line? Go to <code>chrome://extensions</code>, find Focus Alarm,
+    click <code>service worker</code> (under "Inspect views") to open its console — every tick
+    prints exactly what it checked and decided.
+    <br /><br />
+    <b>How to verify tracking works with no extension page open:</b> close this tab and every
+    other Focus Alarm tab/popup, sit on a distracting site for a couple minutes, then come back
+    and reopen this debug page. If "Accumulated" reflects real elapsed time (not 0) and "Last
+    background tick" is recent, the background timer stayed alive on its own the whole time.
+  </div>
+
+  <script src="debug.js"></script>
+</body>
+</html>

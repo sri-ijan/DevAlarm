@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8" /><title>Focus Alarm - keepalive</title></head>
+<body>
+  <!-- This page is never shown to the user. It has no tab, no window, no icon.
+       It exists purely so this extension always has ONE persistent context running,
+       which sends a small heartbeat to the background service worker often enough
+       that Chrome never considers it idle and suspends it. This is what makes
+       distraction tracking work reliably even when you have no extension page open. -->
+  <script src="offscreen.js"></script>
+</body>
+</html>
