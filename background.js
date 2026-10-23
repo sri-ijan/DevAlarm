@@ -28,6 +28,7 @@ const REVEAL_UNLOCK_ATTEMPTS = 5; // wrong attempts needed before "reveal answer
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SETTINGS = {
+  enabled: true, // master switch: when false, nothing is tracked and no alarm can fire
   distractingSites: [
     "youtube.com",
     "instagram.com",
@@ -175,6 +176,13 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!stored.settings) {
     await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
   }
+
+  // An alarm left over from an older version holds questions in the old format, so drop it.
+  const existing = await getState();
+  if (existing.alarmStatus === "ACTIVE") {
+    await clearAlarm();
+  }
+
   chrome.alarms.create(TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
   await ensureOffscreenDocument();
 });
@@ -291,17 +299,52 @@ async function selectChallengeQuestions(settings) {
 
   const shuffled = shuffle(pool);
   const count = Math.min(settings.numQuestions, shuffled.length);
-  return shuffled.slice(0, count);
+  // Only the PUBLIC version (no answer, no accept-list, no hint) is ever stored in
+  // chrome.storage, so the content script / page side can never read the answer key.
+  // MCQ options are shuffled here, once, so their order stays stable while the alarm is up.
+  return shuffled.slice(0, count).map(toPublicQuestion);
 }
 
-// Strip the answer field before this leaves the background context.
+// Whitelist of fields that are safe to hand to the content script.
+function pickPublicFields(q) {
+  const pub = {
+    id: q.id,
+    topic: q.topic,
+    type: q.type,
+    difficulty: q.difficulty,
+    format: q.format === "mcq" ? "mcq" : "blank",
+    question: q.question
+  };
+  if (q.code) pub.code = q.code;
+  if (pub.format === "mcq" && Array.isArray(q.options)) pub.options = q.options;
+  return pub;
+}
+
+// Same as above, but shuffles MCQ options (used once when the alarm is created).
 function toPublicQuestion(q) {
-  const { answer, ...rest } = q;
-  return rest;
+  const pub = pickPublicFields(q);
+  if (pub.options) pub.options = shuffle(pub.options);
+  return pub;
 }
 
-function normalizeAnswer(str) {
-  return String(str).trim().toLowerCase().replace(/\s+/g, " ");
+// Fill-in-the-blank answers ignore case, spaces, hyphens and punctuation,
+// so "Pre-order", "preorder" and "pre order" all match.
+function normalizeBlank(str) {
+  return String(str).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isCorrectAnswer(fullQ, submitted) {
+  if (!fullQ) return false;
+
+  if (fullQ.format === "mcq") {
+    // The user picks one of the displayed options, so an exact text match is required.
+    return String(submitted).trim() === String(fullQ.answer).trim();
+  }
+
+  const given = normalizeBlank(submitted);
+  if (!given) return false;
+  const accepted = [fullQ.answer, ...(fullQ.accept || [])].map(normalizeBlank);
+  return accepted.includes(given);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +356,7 @@ async function triggerAlarm() {
   if (state.alarmStatus === "ACTIVE") return; // already active, don't double-trigger
 
   const settings = await getSettings();
+  if (!settings.enabled) return; // master switch is off -> never ring
   const questions = await selectChallengeQuestions(settings);
 
   await setState({
@@ -351,11 +395,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 async function tick() {
+  const settings = await getSettings();
+
+  // Master switch off -> do nothing at all (no tracking, no alarm).
+  if (!settings.enabled) return;
+
   // Self-heal: if the offscreen keepalive document was ever closed for any reason,
   // this recreates it. Cheap (existence check short-circuits) so safe to call every tick.
   await ensureOffscreenDocument();
 
-  const settings = await getSettings();
   const state = await getState();
 
   // Alarm already ringing -- don't keep accumulating, wait for it to be solved/snoozed.
@@ -431,8 +479,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       case "SET_SETTINGS": {
-        await setSettings(message.settings);
+        // Merge instead of replace, and never let this path touch the master switch --
+        // that only changes through SET_ENABLED below.
+        const current = await getSettings();
+        const { enabled: _ignored, ...incoming } = message.settings || {};
+        await setSettings({ ...current, ...incoming, enabled: current.enabled });
         sendResponse({ ok: true });
+        break;
+      }
+
+      case "SET_ENABLED": {
+        const current = await getSettings();
+        const enabled = !!message.enabled;
+        await setSettings({ ...current, enabled });
+
+        if (!enabled) {
+          // Disabling works even while an alarm is ringing: wipe the alarm, challenge,
+          // timer and snooze, and stop any manual focus session. Every open tab's overlay
+          // removes itself through chrome.storage.onChanged.
+          await clearAlarm();
+          await setState({ focusSession: { active: false, endsAt: null } });
+        } else {
+          // Start tracking from a clean slate.
+          await setState({ distraction: { accumulatedMs: 0, lastTickAt: null } });
+        }
+        sendResponse({ ok: true, enabled });
         break;
       }
 
@@ -459,7 +530,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const currentQ = state.currentChallenge.questions[state.currentChallenge.currentIndex];
         const fullQ = bank.find((q) => q.id === currentQ.id);
 
-        const correct = !!fullQ && normalizeAnswer(fullQ.answer) === normalizeAnswer(message.answer);
+        const correct = isCorrectAnswer(fullQ, message.answer);
 
         if (!correct) {
           const newAttempts = (state.currentChallenge.attempts || 0) + 1;
@@ -615,7 +686,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           distractionReason: reason || null,
           idle,
           thresholdMinutes: settings.thresholdMinutes,
-          alarmStatus: state.alarmStatus,
+          // When the master switch is off nothing can ring, so say that plainly instead of
+          // showing "INACTIVE" (which would make a disabled "Force trigger" look broken).
+          alarmStatus: settings.enabled ? state.alarmStatus : "DISABLED (switch is off)",
           distraction: state.distraction,
           snooze: state.snooze,
           focusSession: state.focusSession,
@@ -660,7 +733,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const q = state.currentChallenge.questions[state.currentChallenge.currentIndex];
         const attempts = state.currentChallenge.attempts || 0;
         sendResponse({
-          question: toPublicQuestion(q),
+          // pickPublicFields (not toPublicQuestion) so MCQ options are NOT reshuffled on every read.
+          question: pickPublicFields(q),
           index: state.currentChallenge.currentIndex,
           total: state.currentChallenge.total,
           attempts,
@@ -714,4 +788,3 @@ if (chrome.idle && chrome.idle.onStateChanged) {
     tick();
   });
 }
-

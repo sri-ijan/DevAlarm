@@ -1,99 +1,112 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>Focus Alarm</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <h1>Focus Alarm</h1>
-  <p id="status-text" class="status">Loading...</p>
+  <header class="top">
+    <h1>Focus Alarm</h1>
+    <span class="tag">DSA &amp; core CS</span>
+  </header>
 
-  <section>
-    <h2>Manual focus session</h2>
-    <p class="hint">Track distraction for a set block of time, without waiting for automatic detection.</p>
-    <div class="row">
-      <select id="focus-duration">
-        <option value="15">15 min</option>
-        <option value="25" selected>25 min</option>
-        <option value="45">45 min</option>
-        <option value="60">60 min</option>
-      </select>
-      <button id="start-focus-btn">Start focus session</button>
+  <!-- Master switch. Always visible. Turning it off hides everything in #main-content. -->
+  <button id="power-btn" class="power" type="button" role="switch" aria-checked="true">
+    <span class="power-label">
+      <span id="power-title" class="power-title">Alarm is ON</span>
+      <span id="power-sub" class="power-sub">Tap to turn off</span>
+    </span>
+    <span class="switch" aria-hidden="true"><span class="knob"></span></span>
+  </button>
+
+  <div id="off-panel" class="off-panel" hidden>
+    <p><strong>Tracking is paused.</strong> Nothing is being timed and no alarm can fire.</p>
+    <p class="muted">Turn the alarm on to see your timer, stats and settings.</p>
+  </div>
+
+  <main id="main-content">
+    <section class="card summary">
+      <p id="status-text" class="status">Loading...</p>
+      <p id="stats-text" class="stats"></p>
+    </section>
+
+    <section class="card">
+      <h2>Manual focus session</h2>
+      <p class="hint">Track a fixed block of time without waiting for automatic detection.</p>
+      <div class="row">
+        <select id="focus-duration">
+          <option value="15">15 min</option>
+          <option value="25" selected>25 min</option>
+          <option value="45">45 min</option>
+          <option value="60">60 min</option>
+        </select>
+        <button id="start-focus-btn" class="btn primary" type="button">Start session</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Distracting sites</h2>
+      <p class="hint">One per line, e.g. youtube.com</p>
+      <textarea id="sites-input" rows="5" spellcheck="false"></textarea>
+
+      <h2 class="spaced">YouTube study channels</h2>
+      <p class="hint">Channels you count as studying. Time on these never counts as distraction. One per line.</p>
+      <textarea id="channels-input" rows="3" spellcheck="false"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>Alarm rules</h2>
+
+      <label class="field">
+        <span>Trigger after (minutes)</span>
+        <input type="number" id="threshold-input" min="1" max="180" />
+      </label>
+
+      <div class="field stack">
+        <span>Questions to solve</span>
+        <div class="row tight">
+          <button class="mode-btn" type="button" data-count="1">Light · 1</button>
+          <button class="mode-btn" type="button" data-count="2">Normal · 2</button>
+          <button class="mode-btn" type="button" data-count="3">Hard · 3</button>
+        </div>
+      </div>
+
+      <label class="field">
+        <span>Custom count</span>
+        <input type="number" id="numq-input" min="1" max="10" />
+      </label>
+
+      <label class="field">
+        <span>Difficulty</span>
+        <select id="difficulty-input">
+          <option value="mixed">Mixed</option>
+          <option value="easy">Easy</option>
+          <option value="medium">Medium</option>
+          <option value="hard">Hard</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>Max snoozes per alarm</span>
+        <input type="number" id="snoozes-input" min="0" max="10" />
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>Topics</h2>
+      <p class="hint">Leave all unchecked to allow every topic.</p>
+      <div id="topics-list" class="topics"></div>
+    </section>
+
+    <button id="save-btn" class="btn primary wide" type="button">Save settings</button>
+    <p id="save-confirm" class="saved" hidden>Saved</p>
+
+    <div class="footer-actions">
+      <button id="test-lock-btn" class="btn ghost" type="button">Test alarm now</button>
+      <button id="debug-btn" class="btn ghost" type="button">Debug panel</button>
     </div>
-  </section>
-
-  <hr />
-
-  <section>
-    <h2>Distracting sites</h2>
-    <p class="hint">One per line (e.g. youtube.com)</p>
-    <textarea id="sites-input" rows="5"></textarea>
-  </section>
-
-  <section>
-    <h2>YouTube study channels</h2>
-    <p class="hint">Channel names you consider educational. YouTube time on these won't count as distraction. One per line.</p>
-    <textarea id="channels-input" rows="3"></textarea>
-  </section>
-
-  <section>
-    <label>
-      Trigger alarm after
-      <input type="number" id="threshold-input" min="1" max="180" /> minutes
-    </label>
-  </section>
-
-  <section>
-    <h2>Challenge mode</h2>
-    <div class="row">
-      <button class="mode-btn" data-count="1">Light (1)</button>
-      <button class="mode-btn" data-count="2">Normal (2)</button>
-      <button class="mode-btn" data-count="3">Hard (3)</button>
-    </div>
-    <label>
-      Custom count
-      <input type="number" id="numq-input" min="1" max="10" />
-    </label>
-  </section>
-
-  <section>
-    <label>
-      Difficulty
-      <select id="difficulty-input">
-        <option value="mixed">Mixed</option>
-        <option value="easy">Easy</option>
-        <option value="medium">Medium</option>
-        <option value="hard">Hard</option>
-      </select>
-    </label>
-  </section>
-
-  <section>
-    <h2>Topics (optional filter)</h2>
-    <p class="hint">Leave all unchecked to allow every topic.</p>
-    <div id="topics-list" class="checkbox-list"></div>
-  </section>
-
-  <section>
-    <label>
-      Max snoozes per alarm
-      <input type="number" id="snoozes-input" min="0" max="10" />
-    </label>
-  </section>
-
-  <button id="save-btn">Save settings</button>
-  <p id="save-confirm" class="hint" style="display:none;">Saved!</p>
-
-  <hr />
-
-  <section>
-    <h2>Stats</h2>
-    <p id="stats-text" class="hint"></p>
-  </section>
-
-  <button id="test-lock-btn" class="secondary">Test alarm now</button>
-  <button id="debug-btn" class="secondary">Open debug panel</button>
+  </main>
 
   <script src="popup.js"></script>
 </body>

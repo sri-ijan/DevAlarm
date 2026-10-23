@@ -188,6 +188,30 @@
     .fa-input::placeholder { color: rgba(245, 243, 255, 0.4); }
     .fa-input:focus { border-color: rgba(167, 139, 250, 0.6); }
 
+    /* Multiple-choice options */
+    .fa-options { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .fa-option {
+      width: 100%;
+      text-align: left;
+      padding: 11px 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      font-family: inherit;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      color: #f5f3ff;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .fa-option:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+    .fa-option.selected {
+      border-color: rgba(167, 139, 250, 0.9);
+      background: rgba(139, 92, 246, 0.22);
+    }
+    .fa-option:disabled { opacity: 0.55; cursor: not-allowed; }
+    .fa-submit:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+
     .fa-submit {
       margin-top: 12px;
       width: 100%;
@@ -286,7 +310,8 @@
           </div>
           <div class="fa-question" id="fa-question"></div>
           <pre class="fa-code" id="fa-code" style="display:none;"></pre>
-          <input class="fa-input" id="fa-answer" type="text" placeholder="Your answer" autocomplete="off" />
+          <div class="fa-options" id="fa-options" style="display:none;"></div>
+          <input class="fa-input" id="fa-answer" type="text" placeholder="Type the missing word or value" autocomplete="off" />
           <button class="fa-submit" id="fa-submit">Submit</button>
           <p class="fa-feedback" id="fa-feedback"></p>
 
@@ -379,7 +404,38 @@
     }
 
     const answerInput = shadowRoot.querySelector("#fa-answer");
+    const optionsEl = shadowRoot.querySelector("#fa-options");
+    const submitBtn = shadowRoot.querySelector("#fa-submit");
+
+    selectedOption = null;
+    currentFormat = question.format === "mcq" ? "mcq" : "blank";
     answerInput.value = "";
+    optionsEl.innerHTML = "";
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Submit";
+
+    if (currentFormat === "mcq" && Array.isArray(question.options)) {
+      // Multiple choice: render one button per option.
+      answerInput.style.display = "none";
+      optionsEl.style.display = "flex";
+      question.options.forEach((optionText, i) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "fa-option";
+        btn.textContent = `${String.fromCharCode(65 + i)}.  ${optionText}`;
+        btn.addEventListener("click", () => {
+          selectedOption = optionText;
+          optionsEl.querySelectorAll(".fa-option").forEach((b) => b.classList.remove("selected"));
+          btn.classList.add("selected");
+        });
+        optionsEl.appendChild(btn);
+      });
+    } else {
+      // Fill in the blank: a single text input.
+      optionsEl.style.display = "none";
+      answerInput.style.display = "block";
+    }
+
     shadowRoot.querySelector("#fa-feedback").textContent = "";
     shadowRoot.querySelector("#fa-feedback").className = "fa-feedback";
 
@@ -388,7 +444,44 @@
     hintTextEl.classList.remove("visible");
 
     updateHelpButtons(attempts, hintUnlockAt, revealUnlockAt, hintUnlocked, revealUnlocked);
-    answerInput.focus();
+    if (currentFormat === "blank") answerInput.focus();
+  }
+
+  // Which question format is on screen, and which MCQ option (if any) is selected.
+  let currentFormat = "blank";
+  let selectedOption = null;
+
+  // Short lock after a wrong multiple-choice pick, so the answer can't be found by
+  // mashing options. Kept deliberately small so it never gets annoying.
+  function startCooldown(seconds) {
+    if (!shadowRoot) return;
+    const submitBtn = shadowRoot.querySelector("#fa-submit");
+    const optionBtns = shadowRoot.querySelectorAll(".fa-option");
+    let left = seconds;
+
+    selectedOption = null;
+    optionBtns.forEach((b) => {
+      b.classList.remove("selected");
+      b.disabled = true;
+    });
+    submitBtn.disabled = true;
+    submitBtn.textContent = `Try again in ${left}s`;
+
+    const timer = setInterval(() => {
+      left -= 1;
+      if (!shadowRoot) {
+        clearInterval(timer); // overlay was removed (solved, snoozed or disabled)
+        return;
+      }
+      if (left <= 0) {
+        clearInterval(timer);
+        optionBtns.forEach((b) => (b.disabled = false));
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit";
+      } else {
+        submitBtn.textContent = `Try again in ${left}s`;
+      }
+    }, 1000);
   }
 
   async function handleSubmit() {
@@ -396,7 +489,24 @@
     const answerInput = shadowRoot.querySelector("#fa-answer");
     const feedbackEl = shadowRoot.querySelector("#fa-feedback");
 
-    const res = await chrome.runtime.sendMessage({ type: "SUBMIT_ANSWER", answer: answerInput.value });
+    let answer;
+    if (currentFormat === "mcq") {
+      if (selectedOption === null) {
+        feedbackEl.textContent = "Pick one of the options first.";
+        feedbackEl.className = "fa-feedback info";
+        return;
+      }
+      answer = selectedOption;
+    } else {
+      answer = answerInput.value;
+      if (!answer.trim()) {
+        feedbackEl.textContent = "Type your answer first.";
+        feedbackEl.className = "fa-feedback info";
+        return;
+      }
+    }
+
+    const res = await chrome.runtime.sendMessage({ type: "SUBMIT_ANSWER", answer });
 
     if (!res) {
       feedbackEl.textContent = "Something went wrong. Try again.";
@@ -424,6 +534,7 @@
       feedbackEl.className = "fa-feedback wrong";
       shadowRoot.querySelector("#fa-attempts").textContent = `attempts: ${res.attempts}`;
       updateHelpButtons(res.attempts, HINT_UNLOCK_ATTEMPTS_FALLBACK, REVEAL_UNLOCK_ATTEMPTS_FALLBACK, res.hintUnlocked, res.revealUnlocked);
+      if (currentFormat === "mcq") startCooldown(2);
     }
   }
 

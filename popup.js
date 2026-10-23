@@ -1,5 +1,9 @@
 // popup.js
 // Runs when the user clicks the extension icon.
+//
+// The big power button is the master switch (settings.enabled, owned by background.js).
+// When it is off, #main-content (timer, stats, every setting) is hidden and only the
+// switch and a short "paused" note remain.
 
 const ALL_TOPICS = [
   { id: "arrays", label: "Arrays" },
@@ -22,7 +26,14 @@ const ALL_TOPICS = [
   { id: "language-concepts", label: "Language Concepts" }
 ];
 
+const powerBtn = document.getElementById("power-btn");
+const powerTitle = document.getElementById("power-title");
+const powerSub = document.getElementById("power-sub");
+const offPanel = document.getElementById("off-panel");
+const mainContent = document.getElementById("main-content");
+
 const statusText = document.getElementById("status-text");
+const statsText = document.getElementById("stats-text");
 const focusDurationEl = document.getElementById("focus-duration");
 const startFocusBtn = document.getElementById("start-focus-btn");
 const sitesInputEl = document.getElementById("sites-input");
@@ -34,11 +45,14 @@ const topicsListEl = document.getElementById("topics-list");
 const snoozesInputEl = document.getElementById("snoozes-input");
 const saveBtn = document.getElementById("save-btn");
 const saveConfirm = document.getElementById("save-confirm");
-const statsText = document.getElementById("stats-text");
 const testLockBtn = document.getElementById("test-lock-btn");
+const debugBtn = document.getElementById("debug-btn");
 const modeButtons = document.querySelectorAll(".mode-btn");
 
-// Build topic checkboxes
+let enabled = true;
+let formLoaded = false; // fill the form once, so the periodic refresh never overwrites typing
+
+// ---------- topic checkboxes ----------
 ALL_TOPICS.forEach((topic) => {
   const label = document.createElement("label");
   const checkbox = document.createElement("input");
@@ -46,17 +60,14 @@ ALL_TOPICS.forEach((topic) => {
   checkbox.value = topic.id;
   checkbox.id = `topic-${topic.id}`;
   label.appendChild(checkbox);
-  label.append(" " + topic.label);
+  label.append(topic.label);
   topicsListEl.appendChild(label);
 });
 
-function getSettings() {
-  return chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
-}
-function getState() {
-  return chrome.runtime.sendMessage({ type: "GET_STATE" });
-}
+const getSettings = () => chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
+const getState = () => chrome.runtime.sendMessage({ type: "GET_STATE" });
 
+// ---------- challenge-count presets ----------
 function highlightModeButton(count) {
   modeButtons.forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.count, 10) === count);
@@ -74,9 +85,45 @@ numqInputEl.addEventListener("input", () => {
   highlightModeButton(parseInt(numqInputEl.value, 10));
 });
 
-async function loadIntoForm() {
-  const settings = await getSettings();
+// ---------- rendering ----------
+function renderPower(state) {
+  powerBtn.classList.toggle("off", !enabled);
+  powerBtn.setAttribute("aria-checked", String(enabled));
 
+  if (enabled) {
+    powerTitle.textContent = "Alarm is ON";
+    powerSub.textContent =
+      state && state.alarmStatus === "ACTIVE"
+        ? "Alarm is ringing. Tap to turn off"
+        : "Tap to turn off";
+  } else {
+    powerTitle.textContent = "Alarm is OFF";
+    powerSub.textContent = "Tap to turn on";
+  }
+
+  mainContent.hidden = !enabled;
+  offPanel.hidden = enabled;
+}
+
+function renderStatus(settings, state) {
+  if (state.alarmStatus === "ACTIVE") {
+    statusText.textContent = "Alarm is ringing on your open tabs.";
+  } else if (state.snooze.snoozeUntil && Date.now() < state.snooze.snoozeUntil) {
+    const mins = Math.ceil((state.snooze.snoozeUntil - Date.now()) / 60000);
+    statusText.textContent = `Snoozed. ${mins} min left.`;
+  } else if (state.focusSession.active && state.focusSession.endsAt > Date.now()) {
+    const mins = Math.ceil((state.focusSession.endsAt - Date.now()) / 60000);
+    statusText.textContent = `Focus session running. ${mins} min left.`;
+  } else {
+    const accMin = Math.floor(state.distraction.accumulatedMs / 60000);
+    statusText.textContent = `Watching. ${accMin} of ${settings.thresholdMinutes} distracted minutes used.`;
+  }
+
+  statsText.textContent =
+    `Alarms triggered: ${state.stats.alarmsTriggered}  ·  Problems solved: ${state.stats.problemsSolved}`;
+}
+
+function fillForm(settings) {
   ALL_TOPICS.forEach((topic) => {
     document.getElementById(`topic-${topic.id}`).checked = settings.topics.includes(topic.id);
   });
@@ -88,29 +135,41 @@ async function loadIntoForm() {
   difficultyInputEl.value = settings.difficulty;
   snoozesInputEl.value = settings.maxSnoozes;
   highlightModeButton(settings.numQuestions);
-
-  const state = await getState();
-
-  if (state.alarmStatus === "ACTIVE") {
-    statusText.textContent = "🔒 Alarm is currently active.";
-  } else if (state.snooze.snoozeUntil && Date.now() < state.snooze.snoozeUntil) {
-    const mins = Math.ceil((state.snooze.snoozeUntil - Date.now()) / 60000);
-    statusText.textContent = `😴 Snoozed for ${mins} more minute(s).`;
-  } else if (state.focusSession.active && state.focusSession.endsAt > Date.now()) {
-    const mins = Math.ceil((state.focusSession.endsAt - Date.now()) / 60000);
-    statusText.textContent = `🎯 Focus session running (${mins} min left).`;
-  } else {
-    const accMin = Math.floor(state.distraction.accumulatedMs / 60000);
-    statusText.textContent = `Tracking. ${accMin}/${settings.thresholdMinutes} distracted minutes so far.`;
-  }
-
-  statsText.textContent = `Alarms triggered: ${state.stats.alarmsTriggered} · Problems solved: ${state.stats.problemsSolved}`;
 }
 
+async function refresh() {
+  const [settings, state] = await Promise.all([getSettings(), getState()]);
+  enabled = settings.enabled !== false;
+
+  renderPower(state);
+
+  if (enabled) {
+    if (!formLoaded) {
+      fillForm(settings);
+      formLoaded = true;
+    }
+    renderStatus(settings, state);
+  }
+}
+
+// ---------- master switch ----------
+powerBtn.addEventListener("click", async () => {
+  powerBtn.disabled = true;
+  try {
+    // Turning it off also clears a ringing alarm (background.js wipes it and every open
+    // tab's overlay removes itself), so this works even while the alarm is going off.
+    await chrome.runtime.sendMessage({ type: "SET_ENABLED", enabled: !enabled });
+  } finally {
+    powerBtn.disabled = false;
+  }
+  await refresh();
+});
+
+// ---------- actions ----------
 startFocusBtn.addEventListener("click", async () => {
   const minutes = parseInt(focusDurationEl.value, 10);
   await chrome.runtime.sendMessage({ type: "START_FOCUS_SESSION", minutes });
-  loadIntoForm();
+  refresh();
 });
 
 saveBtn.addEventListener("click", async () => {
@@ -118,35 +177,34 @@ saveBtn.addEventListener("click", async () => {
     .filter((topic) => document.getElementById(`topic-${topic.id}`).checked)
     .map((topic) => topic.id);
 
-  const distractingSites = sitesInputEl.value
-    .split("\n").map((s) => s.trim()).filter(Boolean);
-
-  const studyChannels = channelsInputEl.value
-    .split("\n").map((s) => s.trim()).filter(Boolean);
+  const toLines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
 
   const newSettings = {
     topics: selectedTopics, // empty = allow all
-    distractingSites,
-    studyChannels,
+    distractingSites: toLines(sitesInputEl.value),
+    studyChannels: toLines(channelsInputEl.value),
     thresholdMinutes: Math.max(1, parseInt(thresholdInputEl.value, 10) || 20),
     numQuestions: Math.max(1, parseInt(numqInputEl.value, 10) || 1),
     difficulty: difficultyInputEl.value,
     maxSnoozes: Math.max(0, parseInt(snoozesInputEl.value, 10) || 0)
   };
 
+  // The master switch is deliberately not part of this payload (background.js ignores it here).
   await chrome.runtime.sendMessage({ type: "SET_SETTINGS", settings: newSettings });
 
-  saveConfirm.style.display = "block";
-  setTimeout(() => (saveConfirm.style.display = "none"), 1500);
+  saveConfirm.hidden = false;
+  setTimeout(() => (saveConfirm.hidden = true), 1500);
+  refresh();
 });
 
 testLockBtn.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "FORCE_TRIGGER_ALARM" });
-  window.close(); // so the user sees the overlay on their current tab immediately
+  window.close(); // so the overlay is visible on the current tab straight away
 });
 
-document.getElementById("debug-btn").addEventListener("click", () => {
+debugBtn.addEventListener("click", () => {
   chrome.tabs.create({ url: chrome.runtime.getURL("debug.html") });
 });
 
-loadIntoForm();
+refresh();
+setInterval(refresh, 2000); // keeps the status line and the "ringing" label current while the popup is open
