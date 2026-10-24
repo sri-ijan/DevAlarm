@@ -1,0 +1,10 @@
+{
+  "name": "focus-alarm-extension",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Focus Alarm Chrome extension. package.json exists only to run the tests; the extension itself has no build step.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

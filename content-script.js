@@ -1,6 +1,7 @@
 // content-script.js
 //
-// Runs on EVERY page (matches: <all_urls>) because alarm state is GLOBAL — if the
+// Registered dynamically (see background.js syncOverlayScriptLocked) for every site the user
+// granted access to: all sites, or just the blocklist. Alarm state is GLOBAL — if the
 // alarm is active, the overlay must show up no matter which tab the user switches to,
 // not just the tab that triggered it. Kept deliberately small and framework-free per
 // the v1 spec (no React/bundle in the content script).
@@ -13,10 +14,32 @@
 //      (for the study-channel allowlist) and pause the video when the alarm fires.
 
 (function () {
+  // Registered scripts and on-demand injection can both load this file into the same tab.
+  if (window.__focusAlarmLoaded) return;
+  window.__focusAlarmLoaded = true;
+
   const isYouTube = location.hostname.includes("youtube.com") || location.hostname.includes("youtu.be");
 
   let shadowHost = null;
   let shadowRoot = null;
+  let previousFocus = null; // restored when the overlay goes away
+  let inertSet = false; // we made <body> inert and must undo it
+  let watchdog = null; // cleans up if the overlay is orphaned or removed
+  let loadFailures = 0; // consecutive failures to load the current question
+
+  // Every message goes through send(). If the extension was reloaded or updated while this
+  // tab stayed open, the old script can no longer reach the background; in that case the
+  // overlay is removed instead of being left behind with dead buttons.
+  async function send(message) {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) throw new Error("extension context invalidated");
+      return await chrome.runtime.sendMessage(message);
+    } catch (e) {
+      removeOverlay();
+      document.documentElement.style.overflow = "";
+      return null;
+    }
+  }
 
   // ---------------------------------------------------------------------
   // Overlay rendering (glassmorphism: blurred backdrop + floating frosted card)
@@ -33,12 +56,74 @@
   }
 
   function removeOverlay() {
+    if (watchdog) {
+      clearInterval(watchdog);
+      watchdog = null;
+    }
+    const hadOverlay = !!shadowHost;
     if (shadowHost) {
       shadowHost.remove();
       shadowHost = null;
       shadowRoot = null;
     }
     detachKeyboardBlocker();
+    setPageInert(false);
+    if (hadOverlay && previousFocus && previousFocus.isConnected && typeof previousFocus.focus === "function") {
+      try {
+        previousFocus.focus({ preventScroll: true });
+      } catch (e) {
+        /* focus restore is best effort */
+      }
+    }
+    previousFocus = null;
+  }
+
+  // While the overlay is up the page behind it must be unreachable for keyboard AND screen
+  // reader users (aria-modal is not honoured everywhere), so <body> is made inert. The
+  // overlay host is a child of <html>, so it is unaffected.
+  function setPageInert(on) {
+    try {
+      if (on) {
+        if (!inertSet && document.body && !document.body.inert) {
+          document.body.inert = true;
+          inertSet = true;
+        }
+      } else if (inertSet) {
+        if (document.body) document.body.inert = false;
+        inertSet = false;
+      }
+    } catch (e) {
+      /* inert unsupported: the keyboard blocker and overlay still work */
+    }
+  }
+
+  // An inert page must never outlive its overlay: if the extension was reloaded under this
+  // tab, or the overlay element was removed, put the page back.
+  function startWatchdog() {
+    if (watchdog) return;
+    watchdog = setInterval(() => {
+      const orphaned = !(chrome.runtime && chrome.runtime.id);
+      if (orphaned || !shadowHost || !shadowHost.isConnected) {
+        removeOverlay();
+        document.documentElement.style.overflow = "";
+      }
+    }, 1500);
+  }
+
+  function focusableControls() {
+    if (!shadowRoot) return [];
+    return [...shadowRoot.querySelectorAll("button, input, pre[tabindex]")].filter(
+      (el) => !el.disabled && el.getAttribute("tabindex") !== "-1" && el.getClientRects().length > 0
+    );
+  }
+
+  // Puts keyboard focus on the thing the user needs next: the option group or the answer box.
+  function focusPrimary() {
+    if (!shadowRoot) return;
+    const option = shadowRoot.querySelector('.fa-option[tabindex="0"]:not(:disabled)');
+    const input = shadowRoot.querySelector("#fa-answer");
+    const target = option && option.getClientRects().length ? option : input && input.getClientRects().length ? input : focusableControls()[0];
+    if (target) target.focus({ preventScroll: true });
   }
 
   // -----------------------------------------------------------------------
@@ -69,6 +154,8 @@
     event.stopPropagation();
     if (event.stopImmediatePropagation) event.stopImmediatePropagation();
     event.preventDefault();
+    // Focus somehow ended up on the page: Tab brings it back into the dialog.
+    if (event.type === "keydown" && event.key === "Tab") focusPrimary();
   }
 
   function attachKeyboardBlocker() {
@@ -95,7 +182,7 @@
       inset: 0;
       z-index: 2147483647;
       /* Blurs whatever is behind this element -- the actual page underneath. */
-      background: linear-gradient(135deg, rgba(20, 10, 45, 0.55), rgba(10, 15, 35, 0.55));
+      background: linear-gradient(135deg, rgba(20, 10, 45, 0.74), rgba(10, 15, 35, 0.74));
       backdrop-filter: blur(22px) saturate(150%);
       -webkit-backdrop-filter: blur(22px) saturate(150%);
       color: #f5f3ff;
@@ -126,11 +213,11 @@
       font-weight: 700;
       text-shadow: 0 2px 20px rgba(139, 92, 246, 0.4);
     }
-    .fa-header p { color: rgba(245, 243, 255, 0.7); font-size: 13px; margin: 0; }
+    .fa-header p { color: rgba(245, 243, 255, 0.88); font-size: 13px; margin: 0; }
 
     /* The floating glass card -- sits visually "above" the blurred plane behind it. */
     .fa-card {
-      background: rgba(255, 255, 255, 0.08);
+      background: rgba(30, 24, 62, 0.55);
       backdrop-filter: blur(28px) saturate(180%);
       -webkit-backdrop-filter: blur(28px) saturate(180%);
       border: 1px solid rgba(255, 255, 255, 0.18);
@@ -185,8 +272,8 @@
       margin-top: 12px;
       outline: none;
     }
-    .fa-input::placeholder { color: rgba(245, 243, 255, 0.4); }
-    .fa-input:focus { border-color: rgba(167, 139, 250, 0.6); }
+    .fa-input::placeholder { color: rgba(245, 243, 255, 0.68); }
+    .fa-input:focus { border-color: rgba(167, 139, 250, 0.9); }
 
     /* Multiple-choice options */
     .fa-options { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
@@ -209,7 +296,8 @@
       border-color: rgba(167, 139, 250, 0.9);
       background: rgba(139, 92, 246, 0.22);
     }
-    .fa-option:disabled { opacity: 0.55; cursor: not-allowed; }
+    .fa-option { min-height: 44px; }
+    .fa-option:disabled { opacity: 0.6; cursor: not-allowed; }
     .fa-submit:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
 
     .fa-submit {
@@ -240,7 +328,7 @@
       border-radius: 10px;
       border: 1px solid rgba(255, 255, 255, 0.14);
       background: rgba(255, 255, 255, 0.05);
-      color: rgba(245, 243, 255, 0.55);
+      color: rgba(245, 243, 255, 0.8);
       cursor: not-allowed;
       transition: all 0.15s;
     }
@@ -271,22 +359,48 @@
     }
     .fa-hint-text.visible { display: block; }
 
-    .fa-snooze-row { margin-top: 18px; text-align: center; font-size: 12px; color: rgba(245, 243, 255, 0.55); }
+    .fa-why { margin: 6px 0 0; font-size: 13px; color: rgba(245, 243, 255, 0.88); }
+    .fa-snooze-row { margin-top: 18px; text-align: center; font-size: 13px; color: rgba(245, 243, 255, 0.85); }
     .fa-snooze-btn {
       margin-left: 6px;
+      min-height: 32px;
       padding: 5px 10px;
-      font-size: 11px;
+      font-size: 12px;
       border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      background: rgba(255, 255, 255, 0.05);
-      color: rgba(245, 243, 255, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      background: rgba(255, 255, 255, 0.07);
+      color: rgba(245, 243, 255, 0.95);
       cursor: pointer;
     }
     .fa-snooze-btn:hover { background: rgba(255, 255, 255, 0.12); }
-    .fa-hint-line { text-align: center; font-size: 11px; color: rgba(245, 243, 255, 0.4); margin-top: 8px; }
+    .fa-hint-line { text-align: center; font-size: 12px; color: rgba(245, 243, 255, 0.82); margin: 8px 0 0; }
+    .fa-recovery {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(250, 204, 21, 0.4);
+      background: rgba(250, 204, 21, 0.1);
+      font-size: 13px;
+      text-align: center;
+      color: #fde68a;
+    }
+    .fa-recovery p { margin: 0 0 8px; }
+    .fa-recovery[hidden] { display: none; }
+
+    /* Keyboard focus must always be visible. */
+    button:focus-visible, input:focus-visible, pre:focus-visible {
+      outline: 3px solid #fde68a;
+      outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .fa-overlay, .fa-card { animation: none; }
+      .fa-option, .fa-help-btn { transition: none; }
+    }
   `;
 
   async function renderOverlay() {
+    previousFocus = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
     const root = ensureShadowRoot();
     root.innerHTML = "";
 
@@ -296,11 +410,16 @@
 
     const overlay = document.createElement("div");
     overlay.className = "fa-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "fa-title");
+    overlay.setAttribute("aria-describedby", "fa-progress fa-why");
     overlay.innerHTML = `
       <div class="fa-wrap">
         <div class="fa-header">
-          <h1>🔒 Time to refocus</h1>
-          <p id="fa-progress">Loading...</p>
+          <h1 id="fa-title">Time to refocus</h1>
+          <p id="fa-progress" aria-live="polite">Loading...</p>
+          <p class="fa-why" id="fa-why"></p>
         </div>
         <div class="fa-card">
           <div class="fa-badges">
@@ -309,34 +428,70 @@
             <span class="fa-badge" id="fa-attempts"></span>
           </div>
           <div class="fa-question" id="fa-question"></div>
-          <pre class="fa-code" id="fa-code" style="display:none;"></pre>
-          <div class="fa-options" id="fa-options" style="display:none;"></div>
-          <input class="fa-input" id="fa-answer" type="text" placeholder="Type the missing word or value" autocomplete="off" />
-          <button class="fa-submit" id="fa-submit">Submit</button>
-          <p class="fa-feedback" id="fa-feedback"></p>
+          <pre class="fa-code" id="fa-code" tabindex="0" role="region" aria-label="Code for this question" style="display:none;"></pre>
+          <div class="fa-options" id="fa-options" role="radiogroup" aria-labelledby="fa-question" style="display:none;"></div>
+          <input class="fa-input" id="fa-answer" type="text" aria-labelledby="fa-question" placeholder="Type the missing word or value" autocomplete="off" />
+          <button class="fa-submit" id="fa-submit" type="button">Submit</button>
+          <p class="fa-feedback" id="fa-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
 
           <div class="fa-help-row">
-            <button class="fa-help-btn hint" id="fa-hint-btn">💡 Hint</button>
-            <button class="fa-help-btn reveal" id="fa-reveal-btn">👁 Reveal answer</button>
+            <button class="fa-help-btn hint" id="fa-hint-btn" type="button" aria-disabled="true">Hint</button>
+            <button class="fa-help-btn reveal" id="fa-reveal-btn" type="button" aria-disabled="true">Reveal answer</button>
           </div>
-          <p class="fa-hint-text" id="fa-hint-text"></p>
+          <p class="fa-hint-text" id="fa-hint-text" role="status" aria-live="polite"></p>
         </div>
-        <div class="fa-snooze-row" id="fa-snooze-row">
+        <div class="fa-snooze-row" id="fa-snooze-row" role="group" aria-label="Snooze this alarm">
           <span>Not ready yet?</span>
-          <button class="fa-snooze-btn" data-minutes="5">Snooze 5m</button>
-          <button class="fa-snooze-btn" data-minutes="10">Snooze 10m</button>
-          <button class="fa-snooze-btn" data-minutes="30">Snooze 30m</button>
-          <button class="fa-snooze-btn" data-minutes="60">Snooze 1h</button>
+          <button class="fa-snooze-btn" type="button" data-minutes="5" aria-label="Snooze for 5 minutes">Snooze 5m</button>
+          <button class="fa-snooze-btn" type="button" data-minutes="10" aria-label="Snooze for 10 minutes">Snooze 10m</button>
+          <button class="fa-snooze-btn" type="button" data-minutes="30" aria-label="Snooze for 30 minutes">Snooze 30m</button>
+          <button class="fa-snooze-btn" type="button" data-minutes="60" aria-label="Snooze for 1 hour">Snooze 1h</button>
         </div>
-        <p class="fa-hint-line" id="fa-snooze-info"></p>
+        <p class="fa-hint-line" id="fa-snooze-info" role="status" aria-live="polite"></p>
+        <div class="fa-recovery" id="fa-recovery" hidden>
+          <p>This alarm could not load its question.</p>
+          <button class="fa-snooze-btn" id="fa-recover-btn" type="button">Dismiss this alarm</button>
+        </div>
+        <p class="fa-hint-line">To stop Focus Alarm entirely, click its toolbar icon and use the big switch.</p>
       </div>
     `;
     root.appendChild(overlay);
 
     document.documentElement.style.overflow = "hidden";
     attachKeyboardBlocker();
+    setPageInert(true);
+    startWatchdog();
+
+    // Keep Tab and Shift+Tab inside the dialog.
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") return;
+      const list = focusableControls();
+      if (!list.length) return;
+      const i = list.indexOf(shadowRoot.activeElement);
+      if (e.shiftKey && i <= 0) {
+        e.preventDefault();
+        list[list.length - 1].focus();
+      } else if (!e.shiftKey && i === list.length - 1) {
+        e.preventDefault();
+        list[0].focus();
+      }
+    });
+
+    // Keys typed inside the dialog stay inside it: without this they bubble out through the
+    // shadow host to the page's own document/window listeners (site hotkeys, key loggers).
+    for (const type of ["keydown", "keyup", "keypress"]) {
+      overlay.addEventListener(type, (e) => e.stopPropagation());
+    }
 
     await loadCurrentQuestion();
+    focusPrimary();
+
+    root.querySelector("#fa-recover-btn").addEventListener("click", async () => {
+      const res = await send({ type: "RECOVER_ALARM" });
+      if (res && res.ok === false && shadowRoot) {
+        shadowRoot.querySelector("#fa-snooze-info").textContent = res.reason || "Could not dismiss the alarm.";
+      }
+    });
 
     root.querySelector("#fa-submit").addEventListener("click", handleSubmit);
     root.querySelector("#fa-answer").addEventListener("keydown", (e) => {
@@ -348,8 +503,9 @@
     root.querySelectorAll(".fa-snooze-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const minutes = parseInt(btn.dataset.minutes, 10);
-        const res = await chrome.runtime.sendMessage({ type: "SNOOZE", minutes });
+        const res = await send({ type: "SNOOZE", minutes });
         const infoEl = root.querySelector("#fa-snooze-info");
+        if (!res) return;
         if (!res.ok) {
           infoEl.textContent = res.reason || "Could not snooze.";
         }
@@ -362,32 +518,57 @@
     if (!shadowRoot) return;
     const hintBtn = shadowRoot.querySelector("#fa-hint-btn");
     const revealBtn = shadowRoot.querySelector("#fa-reveal-btn");
+    const label = (name, unlocked, unlockAt) => {
+      const remaining = unlockAt - attempts;
+      return unlocked ? name : `${name} (locked: ${remaining} more wrong attempt${remaining === 1 ? "" : "s"})`;
+    };
 
-    if (hintUnlocked) {
-      hintBtn.classList.add("unlocked");
-      hintBtn.textContent = "💡 Hint";
-    } else {
-      hintBtn.classList.remove("unlocked");
-      const remaining = hintUnlockAt - attempts;
-      hintBtn.textContent = `💡 Hint (locked — ${remaining} more wrong attempt${remaining === 1 ? "" : "s"})`;
-    }
+    hintBtn.classList.toggle("unlocked", hintUnlocked);
+    hintBtn.setAttribute("aria-disabled", String(!hintUnlocked));
+    hintBtn.textContent = label("Hint", hintUnlocked, hintUnlockAt);
 
-    if (revealUnlocked) {
-      revealBtn.classList.add("unlocked");
-      revealBtn.textContent = "👁 Reveal answer";
-    } else {
-      revealBtn.classList.remove("unlocked");
-      const remaining = revealUnlockAt - attempts;
-      revealBtn.textContent = `👁 Reveal (locked — ${remaining} more wrong attempt${remaining === 1 ? "" : "s"})`;
-    }
+    revealBtn.classList.toggle("unlocked", revealUnlocked);
+    revealBtn.setAttribute("aria-disabled", String(!revealUnlocked));
+    revealBtn.textContent = label("Reveal answer", revealUnlocked, revealUnlockAt);
   }
 
   async function loadCurrentQuestion() {
     if (!shadowRoot) return;
-    const challenge = await chrome.runtime.sendMessage({ type: "GET_PUBLIC_CHALLENGE" });
-    if (!challenge) return;
+    const challenge = await send({ type: "GET_PUBLIC_CHALLENGE" });
+    if (!challenge) {
+      // The alarm may simply have ended elsewhere (solved, snoozed, switched off): re-check the
+      // real state first. If it is still ringing and the question will not load, retry, and
+      // after a couple of failures offer the recovery button instead of a blank card.
+      loadFailures += 1;
+      await syncOverlayWithState();
+      if (!shadowRoot) return;
+      shadowRoot.querySelector("#fa-progress").textContent = "Loading the question...";
+      if (loadFailures >= 2) shadowRoot.querySelector("#fa-recovery").hidden = false;
+      if (loadFailures < 6) setTimeout(loadCurrentQuestion, 1500);
+      return;
+    }
+    loadFailures = 0;
+    shadowRoot.querySelector("#fa-recovery").hidden = true;
 
-    const { question, index, total, attempts, hintUnlocked, revealUnlocked, hintUnlockAt, revealUnlockAt } = challenge;
+    const { question, index, total, attempts, hintUnlocked, revealUnlocked, hintUnlockAt, revealUnlockAt, trigger, snoozesLeft } = challenge;
+    localAdvance = false;
+    shownIndex = index;
+
+    const whyEl = shadowRoot.querySelector("#fa-why");
+    whyEl.textContent =
+      trigger && trigger.hostname
+        ? `You spent about ${trigger.minutes} min on ${trigger.hostname}. Solve ${total === 1 ? "this question" : `these ${total} questions`} to continue.`
+        : "This alarm was started manually.";
+
+    const snoozeRow = shadowRoot.querySelector("#fa-snooze-row");
+    const snoozeInfo = shadowRoot.querySelector("#fa-snooze-info");
+    if (typeof snoozesLeft === "number" && snoozesLeft <= 0) {
+      snoozeRow.style.display = "none";
+      snoozeInfo.textContent = "No snoozes left. Solve the question to continue.";
+    } else {
+      snoozeRow.style.display = "";
+      snoozeInfo.textContent = typeof snoozesLeft === "number" ? `Snoozes left: ${snoozesLeft}` : "";
+    }
 
     shadowRoot.querySelector("#fa-progress").textContent = `Question ${index + 1} of ${total}`;
     shadowRoot.querySelector("#fa-difficulty").textContent = question.difficulty;
@@ -415,19 +596,19 @@
     submitBtn.textContent = "Submit";
 
     if (currentFormat === "mcq" && Array.isArray(question.options)) {
-      // Multiple choice: render one button per option.
+      // Multiple choice is a radio group: one tab stop, arrow keys move and select.
       answerInput.style.display = "none";
       optionsEl.style.display = "flex";
       question.options.forEach((optionText, i) => {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "fa-option";
+        btn.setAttribute("role", "radio");
+        btn.setAttribute("aria-checked", "false");
+        btn.tabIndex = i === 0 ? 0 : -1;
         btn.textContent = `${String.fromCharCode(65 + i)}.  ${optionText}`;
-        btn.addEventListener("click", () => {
-          selectedOption = optionText;
-          optionsEl.querySelectorAll(".fa-option").forEach((b) => b.classList.remove("selected"));
-          btn.classList.add("selected");
-        });
+        btn.addEventListener("click", () => selectOption(btn, optionText));
+        btn.addEventListener("keydown", (e) => onOptionKey(e, btn));
         optionsEl.appendChild(btn);
       });
     } else {
@@ -450,6 +631,45 @@
   // Which question format is on screen, and which MCQ option (if any) is selected.
   let currentFormat = "blank";
   let selectedOption = null;
+  let shownIndex = -1; // which question this tab is currently showing
+  let localAdvance = false; // this tab just advanced the question itself
+
+  function optionButtons() {
+    return shadowRoot ? [...shadowRoot.querySelectorAll(".fa-option")] : [];
+  }
+
+  function selectOption(btn, optionText) {
+    selectedOption = optionText;
+    optionButtons().forEach((b) => {
+      const on = b === btn;
+      b.classList.toggle("selected", on);
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+  }
+
+  function textOfOption(btn) {
+    return btn.textContent.replace(/^[A-Z]\.\s+/, "");
+  }
+
+  function onOptionKey(e, btn) {
+    const list = optionButtons();
+    const i = list.indexOf(btn);
+    let next = null;
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") next = list[(i + 1) % list.length];
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft") next = list[(i - 1 + list.length) % list.length];
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selectedOption === null) selectOption(btn, textOfOption(btn));
+      handleSubmit();
+      return;
+    }
+    if (next) {
+      e.preventDefault();
+      next.focus();
+      selectOption(next, textOfOption(next));
+    }
+  }
 
   // Short lock after a wrong multiple-choice pick, so the answer can't be found by
   // mashing options. Kept deliberately small so it never gets annoying.
@@ -459,9 +679,19 @@
     const optionBtns = shadowRoot.querySelectorAll(".fa-option");
     let left = seconds;
 
+    // Disabling the control that has focus would drop focus to the page. Park it on the
+    // feedback line (focusable by script only) so keyboard and screen-reader users stay put.
+    const feedbackEl = shadowRoot.querySelector("#fa-feedback");
+    if (feedbackEl && shadowRoot.activeElement && shadowRoot.activeElement !== feedbackEl) {
+      feedbackEl.tabIndex = -1;
+      feedbackEl.focus({ preventScroll: true });
+    }
+
     selectedOption = null;
-    optionBtns.forEach((b) => {
+    optionBtns.forEach((b, i) => {
       b.classList.remove("selected");
+      b.setAttribute("aria-checked", "false");
+      b.tabIndex = i === 0 ? 0 : -1;
       b.disabled = true;
     });
     submitBtn.disabled = true;
@@ -478,6 +708,7 @@
         optionBtns.forEach((b) => (b.disabled = false));
         submitBtn.disabled = false;
         submitBtn.textContent = "Submit";
+        focusPrimary();
       } else {
         submitBtn.textContent = `Try again in ${left}s`;
       }
@@ -506,7 +737,7 @@
       }
     }
 
-    const res = await chrome.runtime.sendMessage({ type: "SUBMIT_ANSWER", answer });
+    const res = await send({ type: "SUBMIT_ANSWER", answer });
 
     if (!res) {
       feedbackEl.textContent = "Something went wrong. Try again.";
@@ -521,16 +752,17 @@
     }
 
     if (res.correct) {
-      feedbackEl.textContent = "✅ Correct!";
+      feedbackEl.textContent = "Correct.";
       feedbackEl.className = "fa-feedback correct";
       if (res.done) {
-        feedbackEl.textContent = "✅ All done! Unlocking...";
+        feedbackEl.textContent = "All done. Unlocking.";
         // storage.onChanged will remove the overlay once alarmStatus flips to INACTIVE
       } else {
+        localAdvance = true;
         setTimeout(loadCurrentQuestion, 500);
       }
     } else {
-      feedbackEl.textContent = "❌ Not quite. Try again.";
+      feedbackEl.textContent = "Not quite. Try again.";
       feedbackEl.className = "fa-feedback wrong";
       shadowRoot.querySelector("#fa-attempts").textContent = `attempts: ${res.attempts}`;
       updateHelpButtons(res.attempts, HINT_UNLOCK_ATTEMPTS_FALLBACK, REVEAL_UNLOCK_ATTEMPTS_FALLBACK, res.hintUnlocked, res.revealUnlocked);
@@ -545,24 +777,26 @@
 
   async function handleHintClick() {
     if (!shadowRoot) return;
-    const res = await chrome.runtime.sendMessage({ type: "GET_HINT" });
+    const res = await send({ type: "GET_HINT" });
     const hintTextEl = shadowRoot.querySelector("#fa-hint-text");
     const feedbackEl = shadowRoot.querySelector("#fa-feedback");
 
+    if (!res) return;
     if (!res.ok) {
       feedbackEl.textContent = res.reason || "Hint not available yet.";
       feedbackEl.className = "fa-feedback info";
       return;
     }
-    hintTextEl.textContent = `💡 ${res.hint}`;
+    hintTextEl.textContent = `Hint: ${res.hint}`;
     hintTextEl.classList.add("visible");
   }
 
   async function handleRevealClick() {
     if (!shadowRoot) return;
     const feedbackEl = shadowRoot.querySelector("#fa-feedback");
-    const res = await chrome.runtime.sendMessage({ type: "REVEAL_ANSWER" });
+    const res = await send({ type: "REVEAL_ANSWER" });
 
+    if (!res) return;
     if (!res.ok) {
       feedbackEl.textContent = res.reason || "Reveal not available yet.";
       feedbackEl.className = "fa-feedback info";
@@ -573,6 +807,7 @@
     feedbackEl.className = "fa-feedback info";
 
     if (!res.done) {
+      localAdvance = true;
       setTimeout(loadCurrentQuestion, 1200);
     }
     // if done, storage.onChanged removes the overlay once alarmStatus flips to INACTIVE
@@ -596,9 +831,15 @@
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.state) {
-      syncOverlayWithState();
-    }
+    if (area !== "local" || !changes.state) return;
+    const next = changes.state.newValue;
+    syncOverlayWithState().then(() => {
+      // Another tab answered a question: show the current one here too, not a stale one.
+      const idx = next && next.currentChallenge ? next.currentChallenge.currentIndex : -1;
+      if (shadowRoot && next && next.alarmStatus === "ACTIVE" && !localAdvance && idx !== shownIndex) {
+        loadCurrentQuestion();
+      }
+    });
   });
 
   syncOverlayWithState();
@@ -633,27 +874,23 @@
   }
 
   if (isYouTube) {
-    let lastReportedChannel = null;
-
-    const reportChannel = () => {
-      const channel = getYouTubeChannelName();
-      if (channel && channel !== lastReportedChannel) {
-        lastReportedChannel = channel;
-        chrome.runtime.sendMessage({ type: "YOUTUBE_CHANNEL_INFO", channel });
-      }
+    // null = nothing sent yet, "" = "this page has no channel" (home, shorts, search...).
+    // Reporting "" matters: otherwise the last watched channel would keep the tab classified
+    // as study time after the user navigates to the home feed.
+    let lastReported = null;
+    const currentChannel = () => (location.pathname.startsWith("/watch") ? getYouTubeChannelName() || "" : "");
+    const report = () => {
+      const channel = currentChannel();
+      if (channel === lastReported) return;
+      lastReported = channel;
+      send({ type: "YOUTUBE_CHANNEL_INFO", channel });
     };
 
-    reportChannel();
-    setInterval(reportChannel, 3000);
-
-    const observer = new MutationObserver(() => reportChannel());
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-
-    setInterval(async () => {
-      const stored = await chrome.storage.local.get("state");
-      if (stored.state && stored.state.alarmStatus === "ACTIVE") {
-        pauseYouTubeVideo();
-      }
+    report();
+    window.addEventListener("yt-navigate-finish", report);
+    setInterval(report, 3000);
+    setInterval(() => {
+      if (shadowRoot) pauseYouTubeVideo();
     }, 2000);
   }
 })();

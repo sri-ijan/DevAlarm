@@ -216,6 +216,12 @@ select:focus {
 .topics label { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
 .topics input { accent-color: var(--amber); margin: 0; }
 
+.notice { border-color: var(--amber); }
+.notice .hint { color: var(--text); margin-bottom: 10px; }
+.foot { margin: 12px 0 0; text-align: center; font-size: 12px; }
+.foot a { color: var(--muted); }
+.foot a:hover { color: var(--amber); }
+
 .saved { margin: 6px 0 0; text-align: center; color: var(--amber); font-size: 12px; }
 
 .footer-actions { display: flex; gap: 8px; margin-top: 10px; }

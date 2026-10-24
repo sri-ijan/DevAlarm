@@ -29,11 +29,18 @@
     <section class="card summary">
       <p id="status-text" class="status">Loading...</p>
       <p id="stats-text" class="stats"></p>
+      <p id="access-line" class="stats"></p>
+    </section>
+
+    <section id="setup-card" class="card notice" hidden>
+      <h2 id="setup-title">Finish setup</h2>
+      <p id="setup-text" class="hint"></p>
+      <button id="setup-btn" class="btn primary" type="button">Open setup</button>
     </section>
 
     <section class="card">
-      <h2>Manual focus session</h2>
-      <p class="hint">Track a fixed block of time without waiting for automatic detection.</p>
+      <h2>Study mode</h2>
+      <p class="hint">Pauses tracking for a fixed block of time. Nothing is timed and no alarm can ring until it ends.</p>
       <div class="row">
         <select id="focus-duration">
           <option value="15">15 min</option>
@@ -41,7 +48,7 @@
           <option value="45">45 min</option>
           <option value="60">60 min</option>
         </select>
-        <button id="start-focus-btn" class="btn primary" type="button">Start session</button>
+        <button id="start-focus-btn" class="btn primary" type="button">Start study mode</button>
       </div>
     </section>
 
@@ -88,8 +95,13 @@
       </label>
 
       <label class="field">
-        <span>Max snoozes per alarm</span>
+        <span>Max snoozes in a row</span>
         <input type="number" id="snoozes-input" min="0" max="10" />
+      </label>
+
+      <label class="field">
+        <span>Daily snooze limit (0 = none)</span>
+        <input type="number" id="daily-snooze-input" min="0" max="50" />
       </label>
     </section>
 
@@ -106,6 +118,7 @@
       <button id="test-lock-btn" class="btn ghost" type="button">Test alarm now</button>
       <button id="debug-btn" class="btn ghost" type="button">Debug panel</button>
     </div>
+    <p class="foot"><a href="#" id="setup-link">Setup guide, site access and privacy</a></p>
   </main>
 
   <script src="popup.js"></script>

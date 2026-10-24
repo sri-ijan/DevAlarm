@@ -1,790 +1,759 @@
-// background.js
+// background.js  (ES module service worker, see "background.type" in manifest.json)
 //
-// This is the extension's "brain" — a Manifest V3 service worker. It has NO visible UI.
-// Its jobs:
-//   1. Every ~1 minute, check whether the user is currently on a distracting site,
-//      and whether they're idle (idle time doesn't count).
-//   2. Accumulate distracted time. When it crosses the threshold, set the GLOBAL
-//      alarm state to ACTIVE. This state lives in chrome.storage.local, so it survives
-//      the service worker being suspended/restarted by Chrome (which happens often in MV3).
-//   3. Pick a set of challenge questions from the local question bank and store them
-//      WITHOUT their answers — the content script (which runs inside web pages) never
-//      sees correct answers. Answer-checking happens only here, in the background.
-//   4. Handle messages from the popup and the content script: start focus session,
-//      snooze, submit answer, report YouTube channel info, etc.
+// Wiring between Chrome and the pure logic in engine.js. Design rules:
 //
-// Because alarm state is global (not tied to a tab), every content script on every
-// open tab watches chrome.storage.onChanged and shows/hides the overlay accordingly.
+//  * Nothing here relies on the service worker staying alive. Every observation re-reads
+//    state from chrome.storage, credits elapsed time using timestamps, writes it back, and
+//    schedules the next wake-up with chrome.alarms.
+//  * Two alarms: a one-shot "threshold" alarm set for the moment the distraction limit
+//    would be reached (precise), and a 1-minute "tick" backstop (catches everything else).
+//    Browser events (tab switch, navigation, window focus, idle change) also trigger an
+//    observation, so the timer is correct even when an alarm fires late.
+//  * All reads/writes of state go through one promise queue, so two events arriving at the
+//    same moment can never interleave and lose or double-count time.
+//  * Only the PUBLIC fields of a question are ever stored in state. Answers, accepted
+//    variants and hints are looked up from data/questions.json at check time.
+//  * Every message is checked: sender must be this extension, and content scripts may only
+//    send the few message types an overlay needs.
 
-const TICK_ALARM_NAME = "focus-alarm-tick";
-const TICK_INTERVAL_MINUTES = 1;
-const IDLE_THRESHOLD_SECONDS = 60; // user must be inactive this long to count as "idle"
-const MAX_TICK_GAP_MS = 60 * 1000; // cap elapsed time per tick (now that heartbeat runs every ~10s, this only matters for genuine gaps like laptop sleep)
-const HINT_UNLOCK_ATTEMPTS = 3; // wrong attempts needed before the hint button unlocks
-const REVEAL_UNLOCK_ATTEMPTS = 5; // wrong attempts needed before "reveal answer" unlocks
+import {
+  HINT_UNLOCK_ATTEMPTS,
+  REVEAL_UNLOCK_ATTEMPTS,
+  DEFAULT_STATE,
+  sanitizeSettings,
+  sanitizeState,
+  advanceTracking,
+  nextThresholdAt,
+  topHost,
+  classify,
+  freshTracking,
+  snoozeCheck,
+  applySnooze,
+  selectQuestions,
+  toPublicQuestion,
+  isCorrectAnswer,
+  canAttempt,
+  isAuthorized,
+  accessStatus,
+  OVERLAY_SCRIPT_ID
+} from "./engine.js";
 
-// ---------------------------------------------------------------------------
-// Defaults
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SETTINGS = {
-  enabled: true, // master switch: when false, nothing is tracked and no alarm can fire
-  distractingSites: [
-    "youtube.com",
-    "instagram.com",
-    "twitter.com",
-    "x.com",
-    "reddit.com",
-    "facebook.com",
-    "tiktok.com"
-  ],
-  studyChannels: [], // YouTube channel names the user considers educational (case-insensitive substring match)
-  thresholdMinutes: 20,
-  difficulty: "mixed", // "easy" | "medium" | "hard" | "mixed"
-  numQuestions: 1, // Light=1, Normal=2, Hard=3, or any custom number
-  topics: [], // empty = all topics allowed
-  maxSnoozes: 2
-};
-
-const DEFAULT_STATE = {
-  alarmStatus: "INACTIVE", // "INACTIVE" | "ACTIVE"
-  distraction: {
-    accumulatedMs: 0,
-    lastTickAt: null
-  },
-  snooze: {
-    snoozeUntil: null,
-    snoozesUsedThisAlarm: 0
-  },
-  focusSession: {
-    active: false,
-    endsAt: null
-  },
-  currentChallenge: null, // { questions: [{id, topic, type, difficulty, question, code}], currentIndex, total }
-  stats: {
-    alarmsTriggered: 0,
-    problemsSolved: 0
-  }
-};
-
-// In-memory map of tabId -> last known YouTube channel name reported by the content
-// script. This is intentionally NOT persisted to storage — it's cheap to rebuild and
-// doesn't need to survive a service worker restart (the content script re-reports on load).
-const youtubeChannelByTab = {};
-
-// Cache of the question bank so we don't re-fetch on every single tick.
-let questionBankCache = null;
+const TICK_ALARM = "focus-alarm-tick";
+const THRESHOLD_ALARM = "focus-alarm-threshold";
+const CHANNELS_KEY = "ytChannels"; // chrome.storage.session: tabId -> channel name
+const LAST_OBS_KEY = "lastObservation"; // chrome.storage.session, for the debug page only
 
 // ---------------------------------------------------------------------------
-// Storage helpers
+// Serialisation: everything that touches state runs one at a time.
 // ---------------------------------------------------------------------------
 
-async function getSettings() {
+let queue = Promise.resolve();
+function serialize(fn) {
+  const run = queue.then(() => fn());
+  queue = run.catch(() => {}); // a failure must not block the next job
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+// "tracking" is stored under its own key. It changes on every observation, and content
+// scripts in every tab listen to the "state" key, so keeping them apart means open tabs are
+// only woken when something they care about (the alarm itself) actually changes.
+
+async function loadSettings() {
   const stored = await chrome.storage.local.get("settings");
-  return { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  return sanitizeSettings(stored.settings);
 }
 
-async function setSettings(newSettings) {
-  await chrome.storage.local.set({ settings: newSettings });
+async function saveSettings(settings) {
+  await chrome.storage.local.set({ settings });
 }
 
-async function getState() {
-  const stored = await chrome.storage.local.get("state");
-  const state = stored.state || {};
-  // Deep-merge one level so we don't lose defaults for nested objects that were
-  // saved before a new field was added.
-  return {
-    ...DEFAULT_STATE,
-    ...state,
-    distraction: { ...DEFAULT_STATE.distraction, ...(state.distraction || {}) },
-    snooze: { ...DEFAULT_STATE.snooze, ...(state.snooze || {}) },
-    focusSession: { ...DEFAULT_STATE.focusSession, ...(state.focusSession || {}) },
-    stats: { ...DEFAULT_STATE.stats, ...(state.stats || {}) }
-  };
+async function loadState() {
+  const stored = await chrome.storage.local.get(["state", "tracking"]);
+  const base = stored.state && typeof stored.state === "object" ? stored.state : {};
+  return sanitizeState({ ...base, tracking: stored.tracking });
 }
 
-async function setState(patch) {
-  const current = await getState();
-  const next = { ...current, ...patch };
-  await chrome.storage.local.set({ state: next });
-  return next;
+async function saveState(state) {
+  const { tracking, ...rest } = state;
+  const current = await chrome.storage.local.get("state");
+  const toSet = { tracking };
+  if (JSON.stringify(current.state) !== JSON.stringify(rest)) toSet.state = rest;
+  await chrome.storage.local.set(toSet);
 }
 
-async function getQuestionBank() {
-  if (questionBankCache) return questionBankCache;
-  const res = await fetch(chrome.runtime.getURL("data/questions.json"));
-  questionBankCache = await res.json();
-  return questionBankCache;
-}
-
-// ---------------------------------------------------------------------------
-// Offscreen document (keepalive) -- see offscreen.js for why this exists.
-// ---------------------------------------------------------------------------
-
-const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
-let creatingOffscreenPromise = null;
-let lastOffscreenError = null; // surfaced in the debug panel so this is diagnosable, not a guessing game
-
-async function ensureOffscreenDocument() {
+async function loadChannels() {
   try {
-    // getContexts is the modern way to check for an existing offscreen document.
-    if (chrome.runtime.getContexts) {
-      const existing = await chrome.runtime.getContexts({
-        contextTypes: ["OFFSCREEN_DOCUMENT"]
+    const stored = await chrome.storage.session.get(CHANNELS_KEY);
+    return stored[CHANNELS_KEY] && typeof stored[CHANNELS_KEY] === "object" ? stored[CHANNELS_KEY] : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function saveChannels(map) {
+  try {
+    await chrome.storage.session.set({ [CHANNELS_KEY]: map });
+  } catch (e) {
+    /* session storage unavailable: classification simply falls back to "unknown channel" */
+  }
+}
+
+let bankPromise = null;
+function loadBank() {
+  if (!bankPromise) {
+    bankPromise = fetch(chrome.runtime.getURL("data/questions.json"))
+      .then((res) => {
+        if (!res.ok) throw new Error(`Question bank request failed (${res.status}).`);
+        return res.json();
+      })
+      .then((bank) => {
+        if (!Array.isArray(bank)) throw new Error("Question bank is not a list.");
+        return bank;
+      })
+      .catch((e) => {
+        bankPromise = null; // allow a retry on the next alarm
+        throw e;
       });
-      if (existing && existing.length > 0) {
-        lastOffscreenError = null;
-        return;
+  }
+  return bankPromise;
+}
+
+function errMsg(e) {
+  return String((e && e.message) || e).slice(0, 300);
+}
+
+// ---------------------------------------------------------------------------
+// Alarms and idle detection (idempotent: safe to call on every worker start)
+// ---------------------------------------------------------------------------
+
+async function ensureBackstopAlarm() {
+  const existing = await chrome.alarms.get(TICK_ALARM);
+  if (!existing) chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+}
+
+async function applyIdleInterval(settings) {
+  try {
+    chrome.idle.setDetectionInterval(settings.idleSeconds);
+  } catch (e) {
+    /* value out of range: Chrome keeps its previous interval */
+  }
+}
+
+async function scheduleThresholdAlarm(state, settings, now) {
+  const when = nextThresholdAt(state.tracking, now, settings);
+  if (when == null || state.alarmStatus === "ACTIVE" || !settings.enabled) {
+    await chrome.alarms.clear(THRESHOLD_ALARM);
+  } else {
+    chrome.alarms.create(THRESHOLD_ALARM, { when }); // same name replaces: never duplicated
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Host access and the overlay script
+// ---------------------------------------------------------------------------
+// The manifest has no static content script and no required host permission. The user
+// grants access (all sites, or just their blocklist) from the welcome page or the popup, and
+// this function makes the registered overlay script match exactly what was granted.
+
+async function grantedOrigins() {
+  try {
+    const all = await chrome.permissions.getAll();
+    return (all && all.origins) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function overlayScriptDef(matches) {
+  return { id: OVERLAY_SCRIPT_ID, js: ["content-script.js"], matches, runAt: "document_idle", allFrames: false, persistAcrossSessions: true };
+}
+
+/** Must run inside the queue. Idempotent. `inject` also loads the script into tabs that are already open. */
+async function syncOverlayScriptLocked(inject) {
+  const settings = await loadSettings();
+  const access = accessStatus(await grantedOrigins(), settings.distractingSites);
+  let error = null;
+
+  let current = null;
+  try {
+    [current] = await chrome.scripting.getRegisteredContentScripts({ ids: [OVERLAY_SCRIPT_ID] });
+  } catch (e) {
+    current = null;
+  }
+
+  try {
+    if (access.matches.length === 0) {
+      if (current) await chrome.scripting.unregisterContentScripts({ ids: [OVERLAY_SCRIPT_ID] });
+      return { ...access, error };
+    }
+    const sameMatches = current && JSON.stringify([...current.matches].sort()) === JSON.stringify([...access.matches].sort());
+    if (!current) await chrome.scripting.registerContentScripts([overlayScriptDef(access.matches)]);
+    else if (!sameMatches) await chrome.scripting.updateContentScripts([overlayScriptDef(access.matches)]);
+
+    if (inject || !current || !sameMatches) {
+      // The content script guards against being loaded twice, so re-injecting is harmless.
+      const tabs = await chrome.tabs.query({ url: access.matches });
+      for (const tab of tabs) {
+        if (tab.id == null) continue;
+        try {
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content-script.js"] });
+        } catch (e) {
+          /* tab navigated away, is discarded, or is a page Chrome does not allow scripts in */
+        }
       }
     }
-
-    if (creatingOffscreenPromise) {
-      await creatingOffscreenPromise;
-      return;
-    }
-
-    creatingOffscreenPromise = chrome.offscreen.createDocument({
-      url: chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH),
-      reasons: ["BLOBS"], // required by the API; our actual purpose is the keepalive heartbeat
-      justification:
-        "Keeps the background timer responsive so distraction detection keeps working even when no extension page is open."
-    });
-    await creatingOffscreenPromise;
-    creatingOffscreenPromise = null;
-    lastOffscreenError = null;
-    console.log("[FocusAlarm] offscreen document created successfully.");
   } catch (e) {
-    // "Only a single offscreen document may be created" just means one already exists -- fine,
-    // clear the error in that specific case. Anything else is a real failure worth surfacing.
-    const msg = (e && e.message) || String(e);
-    if (msg.includes("Only a single offscreen")) {
-      lastOffscreenError = null;
-    } else {
-      lastOffscreenError = msg;
-      console.log("[FocusAlarm] ensureOffscreenDocument FAILED:", msg);
-    }
-    creatingOffscreenPromise = null;
+    error = errMsg(e);
+    console.log("[FocusAlarm] overlay script sync failed:", error);
   }
+  return { ...access, error };
 }
 
 // ---------------------------------------------------------------------------
-// Install / startup
+// Observation: "what is the user doing right now?"
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onInstalled.addListener(async () => {
-  const stored = await chrome.storage.local.get("settings");
-  if (!stored.settings) {
-    await chrome.storage.local.set({ settings: DEFAULT_SETTINGS });
-  }
-
-  // An alarm left over from an older version holds questions in the old format, so drop it.
-  const existing = await getState();
-  if (existing.alarmStatus === "ACTIVE") {
-    await clearAlarm();
-  }
-
-  chrome.alarms.create(TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
-  await ensureOffscreenDocument();
-});
-
-chrome.runtime.onStartup.addListener(async () => {
-  chrome.alarms.create(TICK_ALARM_NAME, { periodInMinutes: TICK_INTERVAL_MINUTES });
-  await ensureOffscreenDocument();
-});
-
-// Also try immediately when this script file itself first runs (covers the service
-// worker being woken by something other than onInstalled/onStartup, e.g. an alarm
-// firing after Chrome discarded an older offscreen document for some reason).
-ensureOffscreenDocument();
-
-// ---------------------------------------------------------------------------
-// Detection helpers
-// ---------------------------------------------------------------------------
-
-function getHostname(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch (e) {
-    return null;
-  }
-}
-
-function isYouTubeHost(hostname) {
-  return hostname === "youtube.com" || hostname === "youtu.be" || hostname === "m.youtube.com";
-}
-
-// Internal pages (our own extension's popup/debug page, chrome:// settings, etc.) should
-// PAUSE tracking, not reset it. Otherwise simply glancing at the debug panel -- which
-// briefly makes itself the "active tab" -- would wipe out accumulated progress.
-function isInternalUrl(url) {
-  if (!url) return true;
-  return (
-    url.startsWith("chrome://") ||
-    url.startsWith("chrome-extension://") ||
-    url.startsWith("edge://") ||
-    url.startsWith("about:") ||
-    url.startsWith("devtools://")
-  );
-}
-
-function matchesList(hostname, list) {
-  return list.some((entry) => hostname.includes(entry.replace(/^www\./, "")));
-}
-
-async function isIdle() {
+function queryIdle(seconds) {
   return new Promise((resolve) => {
-    chrome.idle.queryState(IDLE_THRESHOLD_SECONDS, (state) => {
-      resolve(state !== "active");
-    });
+    try {
+      chrome.idle.queryState(seconds, (state) => resolve(state || "active"));
+    } catch (e) {
+      resolve("active");
+    }
   });
 }
 
-async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tab || null;
-}
-
-// Decide whether the current active tab counts as "distracting" right now.
-// This is where the YouTube study-channel allowlist is applied.
-async function evaluateActiveTabDistraction(settings) {
-  const tab = await getActiveTab();
-  if (!tab || !tab.url) return { isDistracting: false, reason: "no-tab" };
-
-  if (isInternalUrl(tab.url)) {
-    // Our own popup/debug page, or a chrome:// page -- pause, don't count as "not distracting".
-    return { isDistracting: false, reason: "internal" };
+async function readBrowserContext(settings) {
+  let tab = null;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  } catch (e) {
+    tab = null;
   }
-
-  const hostname = getHostname(tab.url);
-  if (!hostname) return { isDistracting: false, reason: "invalid-url" };
-
-  const onBlocklist = matchesList(hostname, settings.distractingSites);
-  if (!onBlocklist) return { isDistracting: false, reason: "off-blocklist" };
-
-  if (isYouTubeHost(hostname) && settings.studyChannels.length > 0) {
-    const channel = youtubeChannelByTab[tab.id];
-    if (channel && matchesList(channel.toLowerCase(), settings.studyChannels.map((c) => c.toLowerCase()))) {
-      // Recognized as a study channel -> not distracting.
-      return { isDistracting: false, reason: "study-channel" };
-    }
+  let windowFocused = false;
+  try {
+    const win = await chrome.windows.getLastFocused();
+    windowFocused = !!(win && win.focused);
+  } catch (e) {
+    windowFocused = false;
   }
-
-  return { isDistracting: true, reason: "on-blocklist" };
-}
-
-// ---------------------------------------------------------------------------
-// Challenge selection (background only — answers never leave this file)
-// ---------------------------------------------------------------------------
-
-function shuffle(array) {
-  const arr = [...array];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-async function selectChallengeQuestions(settings) {
-  const bank = await getQuestionBank();
-
-  let pool = bank;
-  if (settings.difficulty !== "mixed") {
-    pool = pool.filter((q) => q.difficulty === settings.difficulty);
-  }
-  if (settings.topics.length > 0) {
-    pool = pool.filter((q) => settings.topics.includes(q.topic));
-  }
-  if (pool.length === 0) pool = bank; // fallback so we never get stuck with zero questions
-
-  const shuffled = shuffle(pool);
-  const count = Math.min(settings.numQuestions, shuffled.length);
-  // Only the PUBLIC version (no answer, no accept-list, no hint) is ever stored in
-  // chrome.storage, so the content script / page side can never read the answer key.
-  // MCQ options are shuffled here, once, so their order stays stable while the alarm is up.
-  return shuffled.slice(0, count).map(toPublicQuestion);
-}
-
-// Whitelist of fields that are safe to hand to the content script.
-function pickPublicFields(q) {
-  const pub = {
-    id: q.id,
-    topic: q.topic,
-    type: q.type,
-    difficulty: q.difficulty,
-    format: q.format === "mcq" ? "mcq" : "blank",
-    question: q.question
+  const idleState = await queryIdle(settings.idleSeconds);
+  const channels = tab ? await loadChannels() : {};
+  return {
+    tab: tab ? { url: tab.url || "", audible: tab.audible === true } : null,
+    tabId: tab ? tab.id : null,
+    windowFocused,
+    idleState,
+    channel: tab && channels[tab.id] ? channels[tab.id] : null
   };
-  if (q.code) pub.code = q.code;
-  if (pub.format === "mcq" && Array.isArray(q.options)) pub.options = q.options;
-  return pub;
 }
 
-// Same as above, but shuffles MCQ options (used once when the alarm is created).
-function toPublicQuestion(q) {
-  const pub = pickPublicFields(q);
-  if (pub.options) pub.options = shuffle(pub.options);
-  return pub;
-}
+/** Must run inside the queue. */
+async function observeLocked(reason) {
+  const settings = await loadSettings();
+  const state = await loadState();
+  const now = Date.now();
 
-// Fill-in-the-blank answers ignore case, spaces, hyphens and punctuation,
-// so "Pre-order", "preorder" and "pre order" all match.
-function normalizeBlank(str) {
-  return String(str).toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function isCorrectAnswer(fullQ, submitted) {
-  if (!fullQ) return false;
-
-  if (fullQ.format === "mcq") {
-    // The user picks one of the displayed options, so an exact text match is required.
-    return String(submitted).trim() === String(fullQ.answer).trim();
+  if (!settings.enabled || state.alarmStatus === "ACTIVE") {
+    await chrome.alarms.clear(THRESHOLD_ALARM);
+    return state;
   }
 
-  const given = normalizeBlank(submitted);
-  if (!given) return false;
-  const accepted = [fullQ.answer, ...(fullQ.accept || [])].map(normalizeBlank);
-  return accepted.includes(given);
+  if (state.studyMode.until && state.studyMode.until <= now) state.studyMode.until = null;
+  if (state.snooze.snoozeUntil && state.snooze.snoozeUntil <= now) state.snooze.snoozeUntil = null;
+
+  const ctx = await readBrowserContext(settings);
+  const verdict = classify({
+    tab: ctx.tab,
+    windowFocused: ctx.windowFocused,
+    idleState: ctx.idleState,
+    channel: ctx.channel,
+    settings,
+    now,
+    snoozeUntil: state.snooze.snoozeUntil,
+    studyUntil: state.studyMode.until
+  });
+
+  try {
+    await chrome.storage.session.set({
+      [LAST_OBS_KEY]: { at: now, why: reason, kind: verdict.kind, reason: verdict.reason, hostname: verdict.hostname, channel: ctx.channel, idleState: ctx.idleState, windowFocused: ctx.windowFocused, url: ctx.tab ? ctx.tab.url : null }
+    });
+  } catch (e) { /* debug info only */ }
+
+  const { tracking, crossed } = advanceTracking(state.tracking, verdict, now, settings);
+  state.tracking = tracking;
+
+  if (crossed) {
+    await ringAlarmLocked(state, settings, now);
+    return state;
+  }
+
+  await saveState(state);
+  await scheduleThresholdAlarm(state, settings, now);
+  return state;
+}
+
+let observePending = false;
+/** Coalesces bursts of browser events into one observation. */
+function observe(reason) {
+  if (observePending) return Promise.resolve();
+  observePending = true;
+  return serialize(() => {
+    observePending = false;
+    return observeLocked(reason);
+  }).catch((e) => console.log("[FocusAlarm] observe failed:", errMsg(e)));
 }
 
 // ---------------------------------------------------------------------------
 // Alarm lifecycle
 // ---------------------------------------------------------------------------
 
-async function triggerAlarm() {
-  const state = await getState();
-  if (state.alarmStatus === "ACTIVE") return; // already active, don't double-trigger
+/** Must run inside the queue. `state` is the freshly loaded, already-advanced state. */
+async function ringAlarmLocked(state, settings, now) {
+  if (state.alarmStatus === "ACTIVE") return;
 
-  const settings = await getSettings();
-  if (!settings.enabled) return; // master switch is off -> never ring
-  const questions = await selectChallengeQuestions(settings);
+  // Empty host = the alarm was started manually (the popup's "Test alarm now").
+  const host = topHost(state.tracking.byHost) || state.tracking.lastHost || "";
+  const minutes = host ? Math.max(1, Math.round(state.tracking.accumulatedMs / 60000)) : 0;
 
-  await setState({
-    alarmStatus: "ACTIVE",
-    currentChallenge: {
-      questions,
-      currentIndex: 0,
-      total: questions.length,
-      attempts: 0,
-      revealedCount: 0
-    },
-    distraction: { accumulatedMs: 0, lastTickAt: null },
-    snooze: { snoozeUntil: null, snoozesUsedThisAlarm: 0 },
-    stats: { ...state.stats, alarmsTriggered: state.stats.alarmsTriggered + 1 }
-  });
-}
+  let picked = null;
+  try {
+    picked = selectQuestions(await loadBank(), settings);
+  } catch (e) {
+    state.lastError = `Could not load questions: ${errMsg(e)}`;
+  }
 
-async function clearAlarm() {
-  await setState({
-    alarmStatus: "INACTIVE",
-    currentChallenge: null,
-    distraction: { accumulatedMs: 0, lastTickAt: null },
-    snooze: { snoozeUntil: null, snoozesUsedThisAlarm: 0 }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Main tick — runs roughly every minute, but uses real timestamps so it's not
-// artificially locked to whole-minute accuracy, and so it self-corrects after
-// the service worker was suspended for a while.
-// ---------------------------------------------------------------------------
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== TICK_ALARM_NAME) return;
-  await tick();
-});
-
-async function tick() {
-  const settings = await getSettings();
-
-  // Master switch off -> do nothing at all (no tracking, no alarm).
-  if (!settings.enabled) return;
-
-  // Self-heal: if the offscreen keepalive document was ever closed for any reason,
-  // this recreates it. Cheap (existence check short-circuits) so safe to call every tick.
-  await ensureOffscreenDocument();
-
-  const state = await getState();
-
-  // Alarm already ringing -- don't keep accumulating, wait for it to be solved/snoozed.
-  if (state.alarmStatus === "ACTIVE") {
-    console.log("[FocusAlarm] tick: alarm already ACTIVE, skipping.");
+  if (!picked || picked.questions.length === 0) {
+    // Fail open: an alarm that cannot be solved must never lock the user's browser.
+    state.lastError = state.lastError || "No usable question matched your settings, so the alarm was skipped.";
+    state.stats.failOpen += 1;
+    state.tracking = freshTracking(now);
+    await saveState(state);
+    await chrome.alarms.clear(THRESHOLD_ALARM);
     return;
   }
 
-  // Snoozed -- skip until the snooze period passes.
-  if (state.snooze.snoozeUntil && Date.now() < state.snooze.snoozeUntil) {
-    console.log("[FocusAlarm] tick: snoozed until", new Date(state.snooze.snoozeUntil).toLocaleTimeString());
-    return;
-  }
+  state.alarmStatus = "ACTIVE";
+  state.currentChallenge = {
+    questions: picked.questions.map((q) => toPublicQuestion(q, Math.random, true)),
+    currentIndex: 0,
+    total: picked.questions.length,
+    attempts: 0,
+    revealedCount: 0,
+    lastAttemptAt: null,
+    relaxedDifficulty: picked.relaxedDifficulty
+  };
+  state.trigger = { hostname: host, minutes };
+  state.tracking = freshTracking(now);
+  state.snooze.snoozeUntil = null;
+  state.stats.alarmsTriggered += 1;
+  await saveState(state);
+  await chrome.alarms.clear(THRESHOLD_ALARM);
+}
 
+/** Alarm finished (solved, revealed, skipped or disabled). */
+function endAlarm(state, now, { resetSnoozes }) {
+  state.alarmStatus = "INACTIVE";
+  state.currentChallenge = null;
+  state.trigger = null;
+  state.tracking = freshTracking(now);
+  state.snooze.snoozeUntil = null;
+  if (resetSnoozes) state.snooze.usedThisEpisode = 0;
+}
+
+/** Moves to the next question, or ends the alarm after the last one. */
+function advanceChallenge(state, now, how) {
+  const ch = state.currentChallenge;
+  if (how === "solved") state.stats.problemsSolved += 1;
+  if (how === "revealed") state.stats.problemsRevealed += 1;
+
+  const next = ch.currentIndex + 1;
+  if (next >= ch.total) {
+    endAlarm(state, now, { resetSnoozes: true });
+    return { done: true };
+  }
+  state.currentChallenge = {
+    ...ch,
+    currentIndex: next,
+    attempts: 0,
+    revealedCount: ch.revealedCount + (how === "revealed" ? 1 : 0),
+    lastAttemptAt: null
+  };
+  return { done: false };
+}
+
+async function currentFullQuestion(state) {
+  const ch = state.currentChallenge;
+  const pub = ch.questions[ch.currentIndex];
+  const bank = await loadBank();
+  return bank.find((q) => q.id === pub.id) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
+
+function publicChallenge(state, settings, now) {
+  const ch = state.currentChallenge;
+  const attempts = ch.attempts;
+  return {
+    question: ch.questions[ch.currentIndex],
+    index: ch.currentIndex,
+    total: ch.total,
+    attempts,
+    hintUnlocked: attempts >= HINT_UNLOCK_ATTEMPTS,
+    revealUnlocked: attempts >= REVEAL_UNLOCK_ATTEMPTS,
+    hintUnlockAt: HINT_UNLOCK_ATTEMPTS,
+    revealUnlockAt: REVEAL_UNLOCK_ATTEMPTS,
+    trigger: state.trigger,
+    snoozesLeft: Math.max(0, settings.maxSnoozes - state.snooze.usedThisEpisode)
+  };
+}
+
+async function handle(message, sender) {
   const now = Date.now();
-  const lastTickAt = state.distraction.lastTickAt || now;
-  const elapsedMs = Math.min(now - lastTickAt, MAX_TICK_GAP_MS);
 
-  const idle = await isIdle();
-  const { isDistracting, reason } = await evaluateActiveTabDistraction(settings);
-  const tab = await getActiveTab();
+  switch (message.type) {
+    case "GET_SETTINGS":
+      return loadSettings();
 
-  console.log("[FocusAlarm] tick:", {
-    url: tab ? tab.url : null,
-    isDistracting,
-    reason,
-    idle,
-    elapsedMs,
-    accumulatedMsBefore: state.distraction.accumulatedMs
-  });
+    case "GET_STATE":
+      return loadState();
 
-  if (reason === "internal") {
-    // User is looking at our own popup/debug page, or a chrome:// page.
-    // PAUSE tracking (don't reset, don't accumulate) and don't advance lastTickAt,
-    // so the "away" time isn't counted against them once they return to a real tab.
-    console.log("[FocusAlarm] active tab is internal -- pausing (state preserved).");
-    return;
-  }
-
-  if (isDistracting && !idle) {
-    const newAccumulated = state.distraction.accumulatedMs + elapsedMs;
-    const thresholdMs = settings.thresholdMinutes * 60 * 1000;
-
-    console.log(`[FocusAlarm] accumulated ${Math.round(newAccumulated / 1000)}s / threshold ${Math.round(thresholdMs / 1000)}s`);
-
-    if (newAccumulated >= thresholdMs) {
-      console.log("[FocusAlarm] threshold reached -- triggering alarm.");
-      await triggerAlarm();
-      return;
+    case "SET_SETTINGS": {
+      const current = await loadSettings();
+      const incoming = message.settings && typeof message.settings === "object" ? message.settings : {};
+      // The master switch only changes through SET_ENABLED.
+      const next = sanitizeSettings({ ...current, ...incoming, enabled: current.enabled });
+      await saveSettings(next);
+      await applyIdleInterval(next);
+      const access = await syncOverlayScriptLocked(false);
+      await observeLocked("settings-changed");
+      return { ok: true, settings: next, access };
     }
 
-    await setState({ distraction: { accumulatedMs: newAccumulated, lastTickAt: now } });
-  } else {
-    // Not distracting right now (wrong site, studying a real channel, or idle) --
-    // reset the counter. Simple v1 behavior: no partial credit/decay.
-    if (state.distraction.accumulatedMs !== 0) {
-      console.log("[FocusAlarm] not distracting/idle -- resetting accumulated time.");
+    case "SET_ENABLED": {
+      const settings = await loadSettings();
+      const enabled = message.enabled === true;
+      await saveSettings({ ...settings, enabled });
+      const state = await loadState();
+      if (!enabled) {
+        // Works even while an alarm is ringing: every open tab's overlay removes itself
+        // through storage.onChanged. This is deliberate (see README "Turning it off").
+        endAlarm(state, now, { resetSnoozes: true });
+        state.studyMode.until = null;
+        await saveState(state);
+        await chrome.alarms.clear(THRESHOLD_ALARM);
+      } else {
+        state.tracking = freshTracking(now);
+        await saveState(state);
+        await observeLocked("enabled"); // start counting right away if the user is on a listed site
+      }
+      return { ok: true, enabled };
     }
-    await setState({ distraction: { accumulatedMs: 0, lastTickAt: now } });
+
+    case "START_FOCUS_SESSION": // kept for popup compatibility: starts study mode
+    case "START_STUDY_MODE": {
+      const minutes = Number(message.minutes);
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 240) return { ok: false, reason: "Minutes must be between 1 and 240." };
+      const state = await loadState();
+      state.studyMode.until = now + Math.round(minutes) * 60000;
+      await saveState(state);
+      await observeLocked("study-mode-started");
+      return { ok: true, until: state.studyMode.until };
+    }
+
+    case "STOP_STUDY_MODE": {
+      const state = await loadState();
+      state.studyMode.until = null;
+      await saveState(state);
+      await observeLocked("study-mode-stopped");
+      return { ok: true };
+    }
+
+    case "GET_ACCESS": {
+      const settings = await loadSettings();
+      return accessStatus(await grantedOrigins(), settings.distractingSites);
+    }
+
+    case "SYNC_ACCESS":
+      return syncOverlayScriptLocked(true);
+
+    case "GET_ONBOARDING": {
+      const stored = await chrome.storage.local.get("onboarding");
+      return { done: !!(stored.onboarding && stored.onboarding.done === true) };
+    }
+
+    case "FINISH_ONBOARDING":
+      await chrome.storage.local.set({ onboarding: { done: true, at: now } });
+      return { ok: true };
+
+    case "GET_PUBLIC_CHALLENGE": {
+      const state = await loadState();
+      if (state.alarmStatus !== "ACTIVE" || !state.currentChallenge) return null;
+      return publicChallenge(state, await loadSettings(), now);
+    }
+
+    case "SUBMIT_ANSWER": {
+      const state = await loadState();
+      const ch = state.currentChallenge;
+      if (state.alarmStatus !== "ACTIVE" || !ch) return { ok: false, reason: "No active challenge." };
+      if (typeof message.answer !== "string") return { ok: false, reason: "Invalid answer." };
+      if (!canAttempt(ch, now)) return { ok: false, reason: "Too fast. Wait a second and try again." };
+
+      let fullQ = null;
+      try {
+        fullQ = await currentFullQuestion(state);
+      } catch (e) {
+        state.lastError = `Could not load questions: ${errMsg(e)}`;
+      }
+
+      if (!fullQ) {
+        // The question can no longer be checked (bank changed or failed to load). Never trap the user.
+        state.stats.failOpen += 1;
+        state.lastError = state.lastError || "A question was missing from the bank, so it was skipped.";
+        const res = advanceChallenge(state, now, "skipped");
+        await saveState(state);
+        return { ok: true, correct: true, done: res.done, skipped: true };
+      }
+
+      if (isCorrectAnswer(fullQ, message.answer)) {
+        const res = advanceChallenge(state, now, "solved");
+        await saveState(state);
+        return { ok: true, correct: true, done: res.done };
+      }
+
+      state.currentChallenge = { ...ch, attempts: ch.attempts + 1, lastAttemptAt: now };
+      await saveState(state);
+      const attempts = state.currentChallenge.attempts;
+      return {
+        ok: true,
+        correct: false,
+        attempts,
+        hintUnlocked: attempts >= HINT_UNLOCK_ATTEMPTS,
+        revealUnlocked: attempts >= REVEAL_UNLOCK_ATTEMPTS
+      };
+    }
+
+    case "GET_HINT": {
+      const state = await loadState();
+      const ch = state.currentChallenge;
+      if (state.alarmStatus !== "ACTIVE" || !ch) return { ok: false, reason: "No active challenge." };
+      if (ch.attempts < HINT_UNLOCK_ATTEMPTS) return { ok: false, reason: "Hint is still locked." };
+      const fullQ = await currentFullQuestion(state).catch(() => null);
+      return { ok: true, hint: (fullQ && fullQ.hint) || "No hint for this one. Take your best guess." };
+    }
+
+    case "REVEAL_ANSWER": {
+      const state = await loadState();
+      const ch = state.currentChallenge;
+      if (state.alarmStatus !== "ACTIVE" || !ch) return { ok: false, reason: "No active challenge." };
+      if (ch.attempts < REVEAL_UNLOCK_ATTEMPTS) return { ok: false, reason: "Reveal is still locked." };
+      const fullQ = await currentFullQuestion(state).catch(() => null);
+      const answer = fullQ ? fullQ.answer : "";
+      const res = advanceChallenge(state, now, "revealed");
+      await saveState(state);
+      return { ok: true, answer, done: res.done };
+    }
+
+    case "SNOOZE": {
+      const state = await loadState();
+      if (state.alarmStatus !== "ACTIVE") return { ok: false, reason: "There is no alarm to snooze." };
+      const settings = await loadSettings();
+      const minutes = Number(message.minutes);
+      const check = snoozeCheck(state.snooze, settings, minutes, now);
+      if (!check.ok) return { ok: false, reason: check.reason };
+
+      endAlarm(state, now, { resetSnoozes: false }); // clears the alarm, keeps usage counters
+      state.snooze = applySnooze(state.snooze, minutes, now); // then starts the snooze
+      state.stats.snoozes += 1;
+      await saveState(state);
+      return { ok: true };
+    }
+
+    case "RECOVER_ALARM": {
+      // Escape hatch for a broken overlay (question cannot be shown or checked). It only works
+      // when the current question is genuinely unavailable, so it cannot be used to skip a
+      // working question.
+      const state = await loadState();
+      if (state.alarmStatus !== "ACTIVE") return { ok: true, nothingToDo: true };
+      let available = false;
+      try {
+        available = !!state.currentChallenge && !!(await currentFullQuestion(state));
+      } catch (e) {
+        available = false;
+      }
+      if (available) {
+        return {
+          ok: false,
+          reason: "The question is available, so this alarm cannot be dismissed that way. Solve it, snooze it, or use the switch in the Focus Alarm popup."
+        };
+      }
+      endAlarm(state, now, { resetSnoozes: true });
+      state.stats.failOpen += 1;
+      state.lastError = "The alarm was dismissed because its question could not be loaded.";
+      await saveState(state);
+      await chrome.alarms.clear(THRESHOLD_ALARM);
+      return { ok: true, recovered: true };
+    }
+
+    case "YOUTUBE_CHANNEL_INFO": {
+      const tabId = sender.tab && sender.tab.id;
+      if (tabId == null) return { ok: false };
+      const channels = await loadChannels();
+      const channel = typeof message.channel === "string" ? message.channel.trim().slice(0, 100) : "";
+      if (channel) channels[tabId] = channel;
+      else delete channels[tabId];
+      await saveChannels(channels);
+      await observeLocked("youtube-channel");
+      return { ok: true };
+    }
+
+    case "FORCE_TRIGGER_ALARM": {
+      const settings = await loadSettings();
+      if (!settings.enabled) return { ok: false, reason: "The alarm is switched off." };
+      const state = await loadState();
+      if (state.alarmStatus === "ACTIVE") return { ok: true };
+      await ringAlarmLocked(state, settings, now);
+      return { ok: true };
+    }
+
+    case "FORCE_TICK":
+      await observeLocked("manual");
+      return { ok: true };
+
+    case "RESET_STATE": {
+      const fresh = sanitizeState({ ...DEFAULT_STATE, tracking: freshTracking(now) });
+      await saveState(fresh);
+      await chrome.alarms.clear(THRESHOLD_ALARM);
+      return { ok: true };
+    }
+
+    case "GET_DEBUG_INFO": {
+      const settings = await loadSettings();
+      const state = await loadState();
+      let lastObservation = null;
+      try {
+        lastObservation = (await chrome.storage.session.get(LAST_OBS_KEY))[LAST_OBS_KEY] || null;
+      } catch (e) { /* none */ }
+      let bank = { ok: true, count: 0, error: null };
+      try {
+        bank.count = (await loadBank()).length;
+      } catch (e) {
+        bank = { ok: false, count: 0, error: errMsg(e) };
+      }
+      const access = accessStatus(await grantedOrigins(), settings.distractingSites);
+      const alarms = (await chrome.alarms.getAll()).map((a) => ({ name: a.name, scheduledTime: a.scheduledTime, periodInMinutes: a.periodInMinutes || null }));
+      return {
+        now,
+        version: chrome.runtime.getManifest().version,
+        enabled: settings.enabled,
+        thresholdMinutes: settings.thresholdMinutes,
+        alarmStatus: settings.enabled ? state.alarmStatus : "DISABLED (switch is off)",
+        tracking: state.tracking,
+        snooze: state.snooze,
+        studyMode: state.studyMode,
+        trigger: state.trigger,
+        stats: state.stats,
+        lastError: state.lastError,
+        lastObservation,
+        access,
+        alarms,
+        bank
+      };
+    }
+
+    default:
+      return { ok: false, reason: "Unknown message type." };
   }
 }
-
-// ---------------------------------------------------------------------------
-// Messages from popup.js and content-script.js
-// ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  (async () => {
-    switch (message.type) {
-      case "GET_SETTINGS": {
-        sendResponse(await getSettings());
-        break;
-      }
-
-      case "SET_SETTINGS": {
-        // Merge instead of replace, and never let this path touch the master switch --
-        // that only changes through SET_ENABLED below.
-        const current = await getSettings();
-        const { enabled: _ignored, ...incoming } = message.settings || {};
-        await setSettings({ ...current, ...incoming, enabled: current.enabled });
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "SET_ENABLED": {
-        const current = await getSettings();
-        const enabled = !!message.enabled;
-        await setSettings({ ...current, enabled });
-
-        if (!enabled) {
-          // Disabling works even while an alarm is ringing: wipe the alarm, challenge,
-          // timer and snooze, and stop any manual focus session. Every open tab's overlay
-          // removes itself through chrome.storage.onChanged.
-          await clearAlarm();
-          await setState({ focusSession: { active: false, endsAt: null } });
-        } else {
-          // Start tracking from a clean slate.
-          await setState({ distraction: { accumulatedMs: 0, lastTickAt: null } });
-        }
-        sendResponse({ ok: true, enabled });
-        break;
-      }
-
-      case "GET_STATE": {
-        sendResponse(await getState());
-        break;
-      }
-
-      case "START_FOCUS_SESSION": {
-        const endsAt = Date.now() + message.minutes * 60 * 1000;
-        await setState({ focusSession: { active: true, endsAt } });
-        sendResponse({ ok: true, endsAt });
-        break;
-      }
-
-      case "SUBMIT_ANSWER": {
-        const state = await getState();
-        if (!state.currentChallenge || state.alarmStatus !== "ACTIVE") {
-          sendResponse({ ok: false, reason: "No active challenge." });
-          break;
-        }
-
-        const bank = await getQuestionBank();
-        const currentQ = state.currentChallenge.questions[state.currentChallenge.currentIndex];
-        const fullQ = bank.find((q) => q.id === currentQ.id);
-
-        const correct = isCorrectAnswer(fullQ, message.answer);
-
-        if (!correct) {
-          const newAttempts = (state.currentChallenge.attempts || 0) + 1;
-          await setState({
-            currentChallenge: { ...state.currentChallenge, attempts: newAttempts }
-          });
-          sendResponse({
-            correct: false,
-            attempts: newAttempts,
-            hintUnlocked: newAttempts >= HINT_UNLOCK_ATTEMPTS,
-            revealUnlocked: newAttempts >= REVEAL_UNLOCK_ATTEMPTS
-          });
-          break;
-        }
-
-        const nextIndex = state.currentChallenge.currentIndex + 1;
-        const isDone = nextIndex >= state.currentChallenge.total;
-
-        if (isDone) {
-          const solvedCount = state.currentChallenge.total;
-          await clearAlarm();
-          const latest = await getState();
-          await setState({
-            stats: { ...latest.stats, problemsSolved: latest.stats.problemsSolved + solvedCount }
-          });
-          sendResponse({ correct: true, done: true });
-        } else {
-          await setState({
-            currentChallenge: { ...state.currentChallenge, currentIndex: nextIndex, attempts: 0 }
-          });
-          sendResponse({ correct: true, done: false });
-        }
-        break;
-      }
-
-      case "GET_HINT": {
-        const state = await getState();
-        if (!state.currentChallenge) {
-          sendResponse({ ok: false, reason: "No active challenge." });
-          break;
-        }
-        const attempts = state.currentChallenge.attempts || 0;
-        if (attempts < HINT_UNLOCK_ATTEMPTS) {
-          sendResponse({ ok: false, reason: "Hint is still locked." });
-          break;
-        }
-        const bank = await getQuestionBank();
-        const currentQ = state.currentChallenge.questions[state.currentChallenge.currentIndex];
-        const fullQ = bank.find((q) => q.id === currentQ.id);
-        sendResponse({ ok: true, hint: (fullQ && fullQ.hint) || "No hint available for this one -- take your best guess." });
-        break;
-      }
-
-      case "REVEAL_ANSWER": {
-        const state = await getState();
-        if (!state.currentChallenge || state.alarmStatus !== "ACTIVE") {
-          sendResponse({ ok: false, reason: "No active challenge." });
-          break;
-        }
-        const attempts = state.currentChallenge.attempts || 0;
-        if (attempts < REVEAL_UNLOCK_ATTEMPTS) {
-          sendResponse({ ok: false, reason: "Reveal is still locked." });
-          break;
-        }
-
-        const bank = await getQuestionBank();
-        const currentQ = state.currentChallenge.questions[state.currentChallenge.currentIndex];
-        const fullQ = bank.find((q) => q.id === currentQ.id);
-        const revealedAnswer = fullQ ? fullQ.answer : "";
-
-        const nextIndex = state.currentChallenge.currentIndex + 1;
-        const isDone = nextIndex >= state.currentChallenge.total;
-        const newRevealedCount = (state.currentChallenge.revealedCount || 0) + 1;
-
-        if (isDone) {
-          await clearAlarm();
-          sendResponse({ ok: true, answer: revealedAnswer, done: true });
-        } else {
-          await setState({
-            currentChallenge: {
-              ...state.currentChallenge,
-              currentIndex: nextIndex,
-              attempts: 0,
-              revealedCount: newRevealedCount
-            }
-          });
-          sendResponse({ ok: true, answer: revealedAnswer, done: false });
-        }
-        break;
-      }
-
-      case "SNOOZE": {
-        const settings = await getSettings();
-        const state = await getState();
-
-        if (state.snooze.snoozesUsedThisAlarm >= settings.maxSnoozes) {
-          sendResponse({ ok: false, reason: "No snoozes left for this alarm." });
-          break;
-        }
-
-        const snoozeUntil = Date.now() + message.minutes * 60 * 1000;
-        await setState({
-          alarmStatus: "INACTIVE",
-          currentChallenge: null,
-          distraction: { accumulatedMs: 0, lastTickAt: null },
-          snooze: {
-            snoozeUntil,
-            snoozesUsedThisAlarm: state.snooze.snoozesUsedThisAlarm + 1
-          }
-        });
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "FORCE_TRIGGER_ALARM": {
-        // Used by the "Test alarm now" button in the popup, for trying out the flow
-        // without waiting for real distraction detection.
-        await triggerAlarm();
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "FORCE_TICK": {
-        // Used by the debug page's "Force tick now" button -- runs one real cycle of
-        // the detection/timer logic immediately, instead of waiting up to 1 minute.
-        await tick();
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "GET_DEBUG_INFO": {
-        const settings = await getSettings();
-        const state = await getState();
-        const tab = await getActiveTab();
-        const idle = await isIdle();
-        const { isDistracting, reason } = await evaluateActiveTabDistraction(settings);
-
-        let offscreenActive = false;
-        try {
-          if (chrome.runtime.getContexts) {
-            const contexts = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-            offscreenActive = !!(contexts && contexts.length > 0);
-          }
-        } catch (e) {
-          // leave offscreenActive false, lastOffscreenError already captures the real reason if any
-        }
-
-        sendResponse({
-          now: Date.now(),
-          activeTabUrl: tab ? tab.url : null,
-          hostname: tab ? getHostname(tab.url) : null,
-          isDistracting,
-          distractionReason: reason || null,
-          idle,
-          thresholdMinutes: settings.thresholdMinutes,
-          // When the master switch is off nothing can ring, so say that plainly instead of
-          // showing "INACTIVE" (which would make a disabled "Force trigger" look broken).
-          alarmStatus: settings.enabled ? state.alarmStatus : "DISABLED (switch is off)",
-          distraction: state.distraction,
-          snooze: state.snooze,
-          focusSession: state.focusSession,
-          youtubeChannelForActiveTab: tab ? youtubeChannelByTab[tab.id] || null : null,
-          offscreenActive,
-          offscreenError: lastOffscreenError
-        });
-        break;
-      }
-
-      case "RESET_STATE": {
-        // Wipes runtime state back to defaults -- handy for re-running tests from scratch.
-        await chrome.storage.local.set({ state: DEFAULT_STATE });
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "HEARTBEAT_TICK": {
-        // Sent every ~10s by offscreen.js. This is now the PRIMARY detection trigger --
-        // it runs on a page-context timer that isn't subject to service-worker suspension,
-        // so it works reliably even with zero extension pages open and zero tab switches.
-        await tick();
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "YOUTUBE_CHANNEL_INFO": {
-        if (sender.tab && sender.tab.id != null) {
-          youtubeChannelByTab[sender.tab.id] = message.channel || "";
-        }
-        sendResponse({ ok: true });
-        break;
-      }
-
-      case "GET_PUBLIC_CHALLENGE": {
-        // Used by content-script to render questions WITHOUT ever seeing answers.
-        const state = await getState();
-        if (!state.currentChallenge) {
-          sendResponse(null);
-          break;
-        }
-        const q = state.currentChallenge.questions[state.currentChallenge.currentIndex];
-        const attempts = state.currentChallenge.attempts || 0;
-        sendResponse({
-          // pickPublicFields (not toPublicQuestion) so MCQ options are NOT reshuffled on every read.
-          question: pickPublicFields(q),
-          index: state.currentChallenge.currentIndex,
-          total: state.currentChallenge.total,
-          attempts,
-          hintUnlocked: attempts >= HINT_UNLOCK_ATTEMPTS,
-          revealUnlocked: attempts >= REVEAL_UNLOCK_ATTEMPTS,
-          hintUnlockAt: HINT_UNLOCK_ATTEMPTS,
-          revealUnlockAt: REVEAL_UNLOCK_ATTEMPTS
-        });
-        break;
-      }
-
-      default:
-        sendResponse({ ok: false, reason: "Unknown message type." });
-    }
-  })();
-  return true; // keep the message channel open for async sendResponse
-});
-
-// Clean up per-tab channel cache when a tab closes.
-chrome.tabs.onRemoved.addListener((tabId) => {
-  delete youtubeChannelByTab[tabId];
+  if (!message || typeof message.type !== "string") {
+    sendResponse({ ok: false, reason: "Malformed message." });
+    return false;
+  }
+  if (!isAuthorized(message.type, sender, chrome.runtime.id, chrome.runtime.getURL(""))) {
+    sendResponse({ ok: false, reason: "Not allowed." });
+    return false;
+  }
+  serialize(() => handle(message, sender)).then(sendResponse, (e) => {
+    console.log("[FocusAlarm] handler failed:", message.type, errMsg(e));
+    sendResponse({ ok: false, reason: errMsg(e) });
+  });
+  return true; // async response
 });
 
 // ---------------------------------------------------------------------------
-// Backup wake triggers -- don't rely on the periodic alarm alone.
-// Chrome reliably delivers these core browsing events to a suspended service
-// worker (that's the whole point of the MV3 event model), so hooking tick() to
-// them means detection keeps working even in the rare case an alarm tick is late.
-// tick() is cheap and already has early-return guards, so calling it more often
-// than strictly necessary is harmless.
+// Lifecycle and event wiring. All listeners are registered synchronously, at top level,
+// as MV3 requires, so Chrome can wake a stopped worker for them.
 // ---------------------------------------------------------------------------
 
-chrome.tabs.onActivated.addListener(() => {
-  tick();
+/** Time the browser was closed or the machine slept is never credited to anything. */
+async function startupLocked(reason) {
+  const settings = await loadSettings();
+  await saveSettings(settings); // writes back sanitised values (repairs malformed storage)
+  const state = await loadState();
+  const now = Date.now();
+  const closedForMs = state.tracking.lastObservedAt == null ? Infinity : now - state.tracking.lastObservedAt;
+  if (closedForMs >= settings.awayResetMinutes * 60000) {
+    state.tracking = freshTracking(now); // away long enough: same rule as leaving the distracting site
+  } else {
+    // Short gap: keep the progress, but credit nothing for the time nobody was observing.
+    state.tracking = { ...state.tracking, lastObservedAt: now, lastKind: "paused", lastHost: null };
+  }
+  await saveState(state);
+  await ensureBackstopAlarm();
+  await applyIdleInterval(settings);
+  await syncOverlayScriptLocked(reason === "installed");
+  await observeLocked(reason);
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
+  serialize(() => startupLocked("installed")).catch((e) => console.log("[FocusAlarm] install failed:", errMsg(e)));
+  if (details && details.reason === "install") {
+    // First run: explain the extension and ask for site access in a full tab.
+    chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") }).catch(() => {});
+  }
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  serialize(() => startupLocked("browser-startup")).catch((e) => console.log("[FocusAlarm] startup failed:", errMsg(e)));
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === TICK_ALARM || alarm.name === THRESHOLD_ALARM) observe(alarm.name);
+});
+
+chrome.tabs.onActivated.addListener(() => observe("tab-activated"));
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === "complete" || changeInfo.url) {
-    tick();
-  }
+  if (changeInfo.status === "complete" || changeInfo.url || changeInfo.audible !== undefined) observe("tab-updated");
 });
 
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId !== chrome.windows.WINDOW_ID_NONE) {
-    tick();
-  }
+chrome.tabs.onRemoved.addListener((tabId) => {
+  serialize(async () => {
+    const channels = await loadChannels();
+    if (channels[tabId] !== undefined) {
+      delete channels[tabId];
+      await saveChannels(channels);
+    }
+  }).catch(() => {});
+  observe("tab-removed");
 });
 
-if (chrome.idle && chrome.idle.onStateChanged) {
-  chrome.idle.onStateChanged.addListener(() => {
-    tick();
-  });
-}
+// The user may grant or revoke access from chrome://extensions at any time.
+const resync = () => serialize(() => syncOverlayScriptLocked(true)).catch(() => {});
+chrome.permissions.onAdded.addListener(resync);
+chrome.permissions.onRemoved.addListener(resync);
+
+chrome.windows.onFocusChanged.addListener(() => observe("window-focus"));
+
+chrome.idle.onStateChanged.addListener(() => observe("idle-changed"));
+
+// Every time the worker starts, make sure the backstop alarm exists (cheap and idempotent).
+ensureBackstopAlarm().catch(() => {});
+serialize(() => syncOverlayScriptLocked(false)).catch(() => {});

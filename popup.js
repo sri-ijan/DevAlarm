@@ -43,11 +43,17 @@ const numqInputEl = document.getElementById("numq-input");
 const difficultyInputEl = document.getElementById("difficulty-input");
 const topicsListEl = document.getElementById("topics-list");
 const snoozesInputEl = document.getElementById("snoozes-input");
+const dailySnoozeInputEl = document.getElementById("daily-snooze-input");
 const saveBtn = document.getElementById("save-btn");
 const saveConfirm = document.getElementById("save-confirm");
 const testLockBtn = document.getElementById("test-lock-btn");
 const debugBtn = document.getElementById("debug-btn");
 const modeButtons = document.querySelectorAll(".mode-btn");
+const accessLine = document.getElementById("access-line");
+const setupCard = document.getElementById("setup-card");
+const setupText = document.getElementById("setup-text");
+const setupBtn = document.getElementById("setup-btn");
+const setupLink = document.getElementById("setup-link");
 
 let enabled = true;
 let formLoaded = false; // fill the form once, so the periodic refresh never overwrites typing
@@ -111,16 +117,23 @@ function renderStatus(settings, state) {
   } else if (state.snooze.snoozeUntil && Date.now() < state.snooze.snoozeUntil) {
     const mins = Math.ceil((state.snooze.snoozeUntil - Date.now()) / 60000);
     statusText.textContent = `Snoozed. ${mins} min left.`;
-  } else if (state.focusSession.active && state.focusSession.endsAt > Date.now()) {
-    const mins = Math.ceil((state.focusSession.endsAt - Date.now()) / 60000);
-    statusText.textContent = `Focus session running. ${mins} min left.`;
+  } else if (studyActive(state)) {
+    const mins = Math.ceil((state.studyMode.until - Date.now()) / 60000);
+    statusText.textContent = `Study mode on. ${mins} min left. Nothing is being tracked.`;
   } else {
-    const accMin = Math.floor(state.distraction.accumulatedMs / 60000);
+    const accMin = Math.floor(state.tracking.accumulatedMs / 60000);
     statusText.textContent = `Watching. ${accMin} of ${settings.thresholdMinutes} distracted minutes used.`;
   }
 
   statsText.textContent =
-    `Alarms triggered: ${state.stats.alarmsTriggered}  ·  Problems solved: ${state.stats.problemsSolved}`;
+    `Alarms: ${state.stats.alarmsTriggered}  ·  Solved: ${state.stats.problemsSolved}  ·  Snoozes: ${state.stats.snoozes}`;
+  startFocusBtn.textContent = studyActive(state) ? "Stop study mode" : "Start study mode";
+  focusDurationEl.disabled = studyActive(state);
+  if (state.lastError) statsText.textContent += `  ·  Note: ${state.lastError}`;
+}
+
+function studyActive(state) {
+  return !!(state.studyMode && state.studyMode.until && state.studyMode.until > Date.now());
 }
 
 function fillForm(settings) {
@@ -134,7 +147,29 @@ function fillForm(settings) {
   numqInputEl.value = settings.numQuestions;
   difficultyInputEl.value = settings.difficulty;
   snoozesInputEl.value = settings.maxSnoozes;
+  dailySnoozeInputEl.value = settings.dailySnoozeLimit;
   highlightModeButton(settings.numQuestions);
+}
+
+function renderAccess(access, onboarding) {
+  const label = {
+    all: "Overlay shows on: every tab",
+    sites: "Overlay shows on: your listed sites only",
+    partial: "Overlay shows on: part of your list",
+    none: "Site access: not granted"
+  }[access.scope];
+  accessLine.textContent = label;
+
+  let text = "";
+  if (access.scope === "none") {
+    text = "Focus Alarm cannot see which site you are on yet, so nothing is tracked. Choose what to allow.";
+  } else if (access.scope === "partial") {
+    text = `Not allowed yet, so not tracked: ${access.missingSites.join(", ")}.`;
+  } else if (!onboarding.done) {
+    text = "Take a minute to set your list, limit and site access.";
+  }
+  setupCard.hidden = text === "";
+  setupText.textContent = text;
 }
 
 async function refresh() {
@@ -149,6 +184,11 @@ async function refresh() {
       formLoaded = true;
     }
     renderStatus(settings, state);
+    const [access, onboarding] = await Promise.all([
+      chrome.runtime.sendMessage({ type: "GET_ACCESS" }),
+      chrome.runtime.sendMessage({ type: "GET_ONBOARDING" })
+    ]);
+    renderAccess(access, onboarding);
   }
 }
 
@@ -167,8 +207,13 @@ powerBtn.addEventListener("click", async () => {
 
 // ---------- actions ----------
 startFocusBtn.addEventListener("click", async () => {
-  const minutes = parseInt(focusDurationEl.value, 10);
-  await chrome.runtime.sendMessage({ type: "START_FOCUS_SESSION", minutes });
+  const state = await getState();
+  if (studyActive(state)) {
+    await chrome.runtime.sendMessage({ type: "STOP_STUDY_MODE" });
+  } else {
+    const minutes = parseInt(focusDurationEl.value, 10);
+    await chrome.runtime.sendMessage({ type: "START_STUDY_MODE", minutes });
+  }
   refresh();
 });
 
@@ -186,7 +231,8 @@ saveBtn.addEventListener("click", async () => {
     thresholdMinutes: Math.max(1, parseInt(thresholdInputEl.value, 10) || 20),
     numQuestions: Math.max(1, parseInt(numqInputEl.value, 10) || 1),
     difficulty: difficultyInputEl.value,
-    maxSnoozes: Math.max(0, parseInt(snoozesInputEl.value, 10) || 0)
+    maxSnoozes: Math.max(0, parseInt(snoozesInputEl.value, 10) || 0),
+    dailySnoozeLimit: Math.max(0, parseInt(dailySnoozeInputEl.value, 10) || 0)
   };
 
   // The master switch is deliberately not part of this payload (background.js ignores it here).
@@ -201,6 +247,14 @@ testLockBtn.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "FORCE_TRIGGER_ALARM" });
   window.close(); // so the overlay is visible on the current tab straight away
 });
+
+function openSetup(event) {
+  if (event) event.preventDefault();
+  // Permission prompts need a full tab: a popup can close the moment Chrome shows its dialog.
+  chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html#access") });
+}
+setupBtn.addEventListener("click", openSetup);
+setupLink.addEventListener("click", openSetup);
 
 debugBtn.addEventListener("click", () => {
   chrome.tabs.create({ url: chrome.runtime.getURL("debug.html") });

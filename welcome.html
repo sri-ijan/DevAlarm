@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Welcome to Focus Alarm</title>
+  <link rel="stylesheet" href="welcome.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to setup</a>
+
+  <header class="hero">
+    <p class="eyebrow">Focus Alarm</p>
+    <h1>Set up in a minute</h1>
+    <p class="lede">When you spend too long on distracting sites, a full-screen alarm covers the page until you solve a few coding or computer-science questions. It is a commitment device, not a lock: you can always switch it off.</p>
+  </header>
+
+  <main id="main">
+    <section class="step" aria-labelledby="h-sites">
+      <h2 id="h-sites"><span class="num" aria-hidden="true">1</span> What counts as a distraction</h2>
+      <p class="help">One site per line. Subdomains are included, so <code>reddit.com</code> also covers <code>old.reddit.com</code>. Anything not listed is never counted.</p>
+      <label class="sr-only" for="sites">Distracting sites, one per line</label>
+      <textarea id="sites" rows="7" spellcheck="false" autocomplete="off"></textarea>
+      <p id="sites-count" class="note" role="status"></p>
+    </section>
+
+    <section class="step" aria-labelledby="h-limit">
+      <h2 id="h-limit"><span class="num" aria-hidden="true">2</span> When the alarm rings</h2>
+      <div class="field">
+        <label for="threshold">Ring after this many distracted minutes</label>
+        <input id="threshold" type="number" min="1" max="240" inputmode="numeric" />
+      </div>
+      <div class="field">
+        <label for="numq">Questions to solve</label>
+        <input id="numq" type="number" min="1" max="10" inputmode="numeric" />
+      </div>
+      <p class="help">Time only counts while the browser is focused, you are not idle, and the active tab is on your list. A short glance at another tab does not reset your progress; five minutes away does. You get a limited number of snoozes (5, 10, 30 or 60 minutes) that you can change in the popup.</p>
+    </section>
+
+    <section class="step" aria-labelledby="h-study">
+      <h2 id="h-study"><span class="num" aria-hidden="true">3</span> Study mode</h2>
+      <p class="help">Watching a lecture on a listed site? Open the Focus Alarm popup and press <strong>Start study mode</strong>. Nothing is timed and no alarm can ring until it ends or you stop it. For YouTube you can also list study channels in the popup.</p>
+    </section>
+
+    <section class="step" aria-labelledby="h-access">
+      <h2 id="h-access"><span class="num" aria-hidden="true">4</span> Site access</h2>
+      <p class="help">Chrome hides the address of the page you are on until you allow it. Choose how much to allow. You can change this later at <strong>chrome://extensions</strong>, Focus Alarm, Details, Site access.</p>
+
+      <div class="choices" role="group" aria-label="Site access choice">
+        <div class="choice">
+          <h3>All sites <span class="badge">recommended</span></h3>
+          <p>The alarm appears on whichever tab you switch to, so it cannot be dodged by changing tabs. Focus Alarm reads only the address of the active tab, to compare it with your list.</p>
+          <button id="grant-all" class="btn primary" type="button">Allow all sites</button>
+        </div>
+        <div class="choice">
+          <h3>Only my list</h3>
+          <p>Access is limited to the sites above. The alarm appears only on those sites; switching to an unlisted tab shows no overlay.</p>
+          <button id="grant-sites" class="btn" type="button">Allow only my list</button>
+        </div>
+      </div>
+
+      <p id="access-status" class="status" role="status" aria-live="polite"></p>
+      <p id="access-msg" class="note" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="step" aria-labelledby="h-privacy">
+      <h2 id="h-privacy"><span class="num" aria-hidden="true">5</span> Privacy</h2>
+      <ul class="plain">
+        <li>Everything stays on this computer. There is no account, no server and no analytics.</li>
+        <li>The address of the active tab is compared with your list and then discarded. No browsing history is recorded or sent anywhere.</li>
+        <li>Settings, progress and simple counters (alarms, solved, snoozes) are saved in the browser's local extension storage and disappear if you remove the extension.</li>
+      </ul>
+    </section>
+
+    <section class="step" aria-labelledby="h-off">
+      <h2 id="h-off"><span class="num" aria-hidden="true">6</span> How to turn it off</h2>
+      <ul class="plain">
+        <li>Click the Focus Alarm icon and press the big switch. It works even while the alarm is ringing.</li>
+        <li>Or use the toggle, or Remove, on the extension's card at <strong>chrome://extensions</strong>.</li>
+        <li>If an alarm ever gets stuck, the overlay shows a recovery button after a failed load.</li>
+      </ul>
+    </section>
+
+    <div class="finish">
+      <button id="finish" class="btn primary big" type="button">Save and finish</button>
+      <p id="finish-msg" class="note" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+
+  <script type="module" src="welcome.js"></script>
+</body>
+</html>

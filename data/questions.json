@@ -1526,7 +1526,7 @@
     "type": "concept",
     "difficulty": "medium",
     "format": "blank",
-    "question": "Routing packets between different networks happens at the _____ layer of the OSI model.",
+    "question": "Routers forward packets between separate LANs at Layer 3 of the OSI model, which is called the _____ layer.",
     "answer": "network",
     "hint": "It is the layer where IP addresses live."
   },
