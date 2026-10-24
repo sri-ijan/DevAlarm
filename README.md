@@ -54,7 +54,7 @@ You do not need to install dependencies or build the extension to use it.
 If you have Git installed, open a terminal and run:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/focus-alarm-extension.git
+git clone https://github.com/sri-ijan/DevAlarm.git
 ```
 
 Replace `YOUR-USERNAME` with the actual GitHub repository owner's username.
