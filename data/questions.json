@@ -386,7 +386,7 @@
     "accept": [
       "open addressing"
     ],
-    "hint": "The key is not locked to one bucket; it stays 'open' to other slots."
+    "hint": "The key is not locked to one bucket; any free slot in the table may end up holding it."
   },
   {
     "id": 30,
@@ -608,7 +608,7 @@
       "merge sort",
       "mergesort"
     ],
-    "hint": "The divide-and-conquer algorithm that merges two sorted halves."
+    "hint": "The divide-and-conquer algorithm that splits the array in half, sorts each half, then combines them."
   },
   {
     "id": 45,

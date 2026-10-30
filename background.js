@@ -40,6 +40,7 @@ import {
 
 const TICK_ALARM = "focus-alarm-tick";
 const THRESHOLD_ALARM = "focus-alarm-threshold";
+const SNOOZE_ALARM = "focus-alarm-snooze-end";
 const CHANNELS_KEY = "ytChannels"; // chrome.storage.session: tabId -> channel name
 const LAST_OBS_KEY = "lastObservation"; // chrome.storage.session, for the debug page only
 
@@ -171,6 +172,15 @@ function overlayScriptDef(matches) {
   return { id: OVERLAY_SCRIPT_ID, js: ["content-script.js"], matches, runAt: "document_idle", allFrames: false, persistAcrossSessions: true };
 }
 
+/** One-shot wake-up at the end of a snooze, so tracking resumes without waiting for another event. */
+async function scheduleSnoozeEndAlarm(state, now) {
+  if (state.snooze.snoozeUntil && state.snooze.snoozeUntil > now && state.alarmStatus !== "ACTIVE") {
+    chrome.alarms.create(SNOOZE_ALARM, { when: state.snooze.snoozeUntil }); // same name replaces: never duplicated
+  } else {
+    await chrome.alarms.clear(SNOOZE_ALARM);
+  }
+}
+
 /** Must run inside the queue. Idempotent. `inject` also loads the script into tabs that are already open. */
 async function syncOverlayScriptLocked(inject) {
   const settings = await loadSettings();
@@ -259,6 +269,7 @@ async function observeLocked(reason) {
 
   if (!settings.enabled || state.alarmStatus === "ACTIVE") {
     await chrome.alarms.clear(THRESHOLD_ALARM);
+    await chrome.alarms.clear(SNOOZE_ALARM);
     return state;
   }
 
@@ -283,7 +294,10 @@ async function observeLocked(reason) {
     });
   } catch (e) { /* debug info only */ }
 
-  const { tracking, crossed } = advanceTracking(state.tracking, verdict, now, settings);
+  // Chrome reports "idle" only after idleSeconds without input; hand that stretch back.
+  // A locked screen is not refunded: locking is an action, so there was no idle lead-in.
+  const idleRefundMs = verdict.reason === "idle" && ctx.idleState === "idle" ? settings.idleSeconds * 1000 : 0;
+  const { tracking, crossed } = advanceTracking(state.tracking, { ...verdict, idleRefundMs }, now, settings);
   state.tracking = tracking;
 
   if (crossed) {
@@ -293,6 +307,7 @@ async function observeLocked(reason) {
 
   await saveState(state);
   await scheduleThresholdAlarm(state, settings, now);
+  await scheduleSnoozeEndAlarm(state, now);
   return state;
 }
 
@@ -447,6 +462,7 @@ async function handle(message, sender) {
         state.studyMode.until = null;
         await saveState(state);
         await chrome.alarms.clear(THRESHOLD_ALARM);
+        await chrome.alarms.clear(SNOOZE_ALARM);
       } else {
         state.tracking = freshTracking(now);
         await saveState(state);
@@ -571,6 +587,7 @@ async function handle(message, sender) {
       state.snooze = applySnooze(state.snooze, minutes, now); // then starts the snooze
       state.stats.snoozes += 1;
       await saveState(state);
+      await scheduleSnoozeEndAlarm(state, now);
       return { ok: true };
     }
 
@@ -629,6 +646,7 @@ async function handle(message, sender) {
       const fresh = sanitizeState({ ...DEFAULT_STATE, tracking: freshTracking(now) });
       await saveState(fresh);
       await chrome.alarms.clear(THRESHOLD_ALARM);
+      await chrome.alarms.clear(SNOOZE_ALARM);
       return { ok: true };
     }
 
@@ -703,7 +721,7 @@ async function startupLocked(reason) {
     state.tracking = freshTracking(now); // away long enough: same rule as leaving the distracting site
   } else {
     // Short gap: keep the progress, but credit nothing for the time nobody was observing.
-    state.tracking = { ...state.tracking, lastObservedAt: now, lastKind: "paused", lastHost: null };
+    state.tracking = { ...state.tracking, lastObservedAt: now, lastKind: "paused", lastHost: null, runMs: 0 };
   }
   await saveState(state);
   await ensureBackstopAlarm();
@@ -725,7 +743,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === TICK_ALARM || alarm.name === THRESHOLD_ALARM) observe(alarm.name);
+  if (alarm.name === TICK_ALARM || alarm.name === THRESHOLD_ALARM || alarm.name === SNOOZE_ALARM) observe(alarm.name);
 });
 
 chrome.tabs.onActivated.addListener(() => observe("tab-activated"));

@@ -18,7 +18,7 @@ Built for students, developers, and anyone who wants to spend less time scrollin
 - **120-question bank:** Programming and core computer science topics, with easy, medium, and hard difficulty levels.
 - **Progressive assistance:** Hints unlock after 3 wrong attempts; the answer is revealed after 5.
 - **YouTube study channels:** Configure channels that should count as studying rather than distraction.
-- **Study Mode:** Temporarily pauses distraction tracking for a focused study session.
+- **Take a break:** Temporarily pauses distraction tracking for a set time, for studying or a real rest.
 - **Snooze:** Temporarily postpones an alarm, with configurable durations and limits.
 - **Master switch:** Turn tracking and alarms on or off from the popup.
 - **Configurable settings:** Choose distracting websites, trigger threshold, topics, difficulty, number of questions, and snooze limits.
@@ -91,7 +91,7 @@ Then open `chrome://extensions`, enable Developer mode, click **Load unpacked**,
 | Topics | Select which subjects can appear. Leaving all unchecked uses all topics. |
 | Difficulty | Choose mixed, easy, medium, or hard. |
 | YouTube study channels | Add channel names that should count as studying. |
-| Study Mode | Pause tracking for a temporary study session. |
+| Take a break | Pause tracking for a set time. |
 | Max snoozes in a row | Set how many times an alarm can be snoozed before a question must be solved. |
 | Daily snooze limit | Optionally limit snoozes per day. |
 
@@ -112,7 +112,7 @@ Focus Alarm uses Chrome's extension APIs and locally stored timestamps to track 
 - Switching briefly to an unrelated tab does not immediately erase progress.
 - Longer periods away may reset progress according to the configured tracking logic.
 - Browser restarts preserve progress under the extension's restart rules, without counting time while the browser is closed.
-- Study Mode pauses tracking temporarily.
+- Taking a break pauses tracking temporarily.
 
 These behaviours are part of the current implementation and are still being verified on real machines.
 
@@ -133,7 +133,7 @@ Please install the extension and try the following scenarios:
 - [ ] Correct answers dismiss the challenge.
 - [ ] Hints unlock after three wrong attempts.
 - [ ] Answer reveal works after five wrong attempts.
-- [ ] Study Mode pauses tracking and tracking resumes when it ends.
+- [ ] Take a break pauses tracking and tracking resumes when the break ends.
 - [ ] The master switch stops tracking and alarms when disabled.
 - [ ] Switching tabs behaves as expected.
 - [ ] Browser restart preserves progress according to the documented rules.

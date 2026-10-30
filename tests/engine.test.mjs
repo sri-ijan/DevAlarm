@@ -126,6 +126,54 @@ test("advanceTracking: gap cap, clock moving backwards, paused", () => {
   assert.equal(r.tracking.accumulatedMs, 12_345, "paused time is credited to nothing and does not reset");
 });
 
+test("advanceTracking idle refund: takes back the idle lead-in, bounded by what was credited and by the current run", () => {
+  const idleObs = (ms) => ({ kind: "away", hostname: null, idleRefundMs: ms });
+  const run = (tr, obs, now) => advanceTracking(tr, obs, now, settings).tracking;
+  // 100 s credited in earlier observations, then a 60 s gap that ends in idle: 180 s lead-in covers all of it.
+  let tr = freshTracking(0, "countable");
+  tr = run(tr, { kind: "countable", hostname: "reddit.com" }, 0);
+  tr = run(tr, { kind: "countable", hostname: "reddit.com" }, 100_000);
+  tr = run(tr, idleObs(180_000), 160_000);
+  assert.equal(tr.accumulatedMs, 0, "refund is capped by the run (160 s), so everything is taken back");
+  assert.equal(tr.awayMs, 0, "the away clock is not pre-loaded");
+  assert.deepEqual(tr.byHost, {});
+  assert.equal(tr.runMs, 0);
+
+  // A smaller lead-in only takes back its own length.
+  tr = run(freshTracking(0, "countable"), { kind: "countable", hostname: "reddit.com" }, 0);
+  tr = run(tr, { kind: "countable", hostname: "reddit.com" }, 120_000);
+  tr = run(tr, idleObs(60_000), 180_000);
+  assert.equal(tr.accumulatedMs, 120_000 + 60_000 - 60_000);
+  assert.equal(tr.byHost["reddit.com"], 120_000);
+
+  // Gap longer than MAX_CREDIT_GAP_MS: the idle window is the END of the gap. 200 s gap, 150 s credited,
+  // 50 s never credited, so only 130 s of a 180 s lead-in overlap credited time.
+  tr = { ...freshTracking(0, "countable"), accumulatedMs: 0 };
+  tr = run(tr, idleObs(180_000), 200_000);
+  assert.equal(tr.accumulatedMs, 20_000, "150 s credited minus 130 s refund");
+  // A 10-minute gap: the lead-in lies entirely in the part that was never credited.
+  tr = run(freshTracking(0, "countable"), idleObs(180_000), 600_000);
+  assert.equal(tr.accumulatedMs, MAX_CREDIT_GAP_MS, "nothing to refund");
+
+  // Only an away observation refunds; staying countable or being paused does not.
+  const stay = advanceTracking(freshTracking(0, "countable"), { kind: "countable", hostname: "reddit.com", idleRefundMs: 60_000 }, 60_000, settings).tracking;
+  assert.equal(stay.accumulatedMs, 60_000);
+  const paused = advanceTracking(freshTracking(0, "countable"), { kind: "paused", hostname: null, idleRefundMs: 60_000 }, 60_000, settings).tracking;
+  assert.equal(paused.accumulatedMs, 60_000);
+  assert.equal(paused.runMs, 0, "a pause ends the run");
+  // Away, then idle observed again later: nothing left to refund.
+  const again = advanceTracking({ ...freshTracking(0, "away"), accumulatedMs: 50_000 }, idleObs(60_000), 30_000, settings).tracking;
+  assert.equal(again.accumulatedMs, 50_000);
+});
+
+test("tracking.runMs is validated and defaults to 0", () => {
+  assert.equal(freshTracking(5).runMs, 0);
+  assert.equal(sanitizeState({ tracking: { runMs: -5 } }).tracking.runMs, 0);
+  assert.equal(sanitizeState({ tracking: { runMs: "x" } }).tracking.runMs, 0);
+  assert.equal(sanitizeState({ tracking: { runMs: 4_500.7 } }).tracking.runMs, 4_500);
+  assert.equal(sanitizeState(undefined).tracking.runMs, 0, "old stored tracking without runMs is fine");
+});
+
 test("advanceTracking: away reset only after awayResetMinutes", () => {
   let t = { ...freshTracking(0, "away"), accumulatedMs: 100_000, byHost: { "reddit.com": 100_000 } };
   let r = step(t, "away", 100_000);

@@ -33,6 +33,16 @@ for (const d of SHIP_DIRS) {
 }
 
 // ---- checks ----
+// Files that must never ship. Named explicitly on purpose: a generic "nothing imports this" scan would
+// wrongly flag legitimate entry points (the manifest, popup, welcome and debug pages are opened by URL,
+// not imported). offscreen.* is the v0.2 keepalive page; v0.3 has no offscreen permission or document.
+const PROHIBITED = {
+  "offscreen.html": "obsolete v0.2 keepalive page; v0.3 has no offscreen document",
+  "offscreen.js": "obsolete v0.2 keepalive script; v0.3 has no offscreen document"
+};
+for (const f of files) if (PROHIBITED[f]) fail(`${f} must not be in the release (${PROHIBITED[f]}); delete it with: git rm ${f}`);
+if ((manifest.permissions || []).includes("offscreen")) fail("the offscreen permission must not come back (nothing in v0.3 uses it)");
+
 const referenced = new Set(["manifest.json"]);
 const add = (p) => p && referenced.add(p);
 add(manifest.background && manifest.background.service_worker);

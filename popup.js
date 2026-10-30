@@ -119,7 +119,7 @@ function renderStatus(settings, state) {
     statusText.textContent = `Snoozed. ${mins} min left.`;
   } else if (studyActive(state)) {
     const mins = Math.ceil((state.studyMode.until - Date.now()) / 60000);
-    statusText.textContent = `Study mode on. ${mins} min left. Nothing is being tracked.`;
+    statusText.textContent = `On a break. ${mins} min left. Nothing is being tracked.`;
   } else {
     const accMin = Math.floor(state.tracking.accumulatedMs / 60000);
     statusText.textContent = `Watching. ${accMin} of ${settings.thresholdMinutes} distracted minutes used.`;
@@ -127,7 +127,7 @@ function renderStatus(settings, state) {
 
   statsText.textContent =
     `Alarms: ${state.stats.alarmsTriggered}  ·  Solved: ${state.stats.problemsSolved}  ·  Snoozes: ${state.stats.snoozes}`;
-  startFocusBtn.textContent = studyActive(state) ? "Stop study mode" : "Start study mode";
+  startFocusBtn.textContent = studyActive(state) ? "Stop break" : "Start break";
   focusDurationEl.disabled = studyActive(state);
   if (state.lastError) statsText.textContent += `  ·  Note: ${state.lastError}`;
 }

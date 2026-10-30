@@ -220,29 +220,112 @@ test("a short glance at another tab does not erase progress", async (t) => {
 test("idle without sound does not count; idle with audio playing does", async (t) => {
   const advance = useClock(t);
   const w = await bootWorker();
-  await configure(w, { thresholdMinutes: 60 });
+  await configure(w, { thresholdMinutes: 60, idleSeconds: 15 });
   w.env.activeTab = REDDIT;
   await w.startup();
 
+  advance(60_000);
+  await w.send("FORCE_TICK"); // 60s of real activity
   w.env.idleState = "idle";
-  advance(30_000);
-  await w.send("FORCE_TICK"); // credits the 30s that were active, then switches to idle
+  advance(15_000); // Chrome reports idle only after idleSeconds without input
+  await w.send("FORCE_TICK"); // those 15s were idle, not active: they are taken back
   advance(30_000);
   await w.send("FORCE_TICK");
-  assert.equal((await w.state()).tracking.accumulatedMs, 30_000);
+  assert.equal((await w.state()).tracking.accumulatedMs, 60_000);
   assert.equal((await w.debug()).lastObservation.reason, "idle");
 
   w.env.activeTab = { ...REDDIT, audible: true };
   await w.send("FORCE_TICK"); // now counting again (idle but audible)
   advance(30_000);
   await w.send("FORCE_TICK");
-  assert.equal((await w.state()).tracking.accumulatedMs, 60_000);
+  assert.equal((await w.state()).tracking.accumulatedMs, 90_000);
 
   w.env.idleState = "locked";
   await w.send("FORCE_TICK");
   advance(30_000);
   await w.send("FORCE_TICK");
-  assert.equal((await w.state()).tracking.accumulatedMs, 60_000, "a locked screen never counts");
+  assert.equal((await w.state()).tracking.accumulatedMs, 90_000, "a locked screen never counts");
+});
+
+test("going idle takes back the idleSeconds that were credited as active, and cannot ring the alarm", async (t) => {
+  const advance = useClock(t);
+  const w = await bootWorker();
+  await configure(w, { thresholdMinutes: 5, idleSeconds: 180 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+
+  advance(2 * 60_000);
+  await w.send("FORCE_TICK"); // 2 min active
+  advance(3 * 60_000); // user walked away right after; Chrome says idle only now
+  w.env.idleState = "idle";
+  await w.alarmFires("focus-alarm-threshold"); // threshold alarm was set for 5 min of "activity"
+  const s = await w.state();
+  assert.equal(s.alarmStatus, "INACTIVE", "idle time must not ring the alarm");
+  assert.equal(s.tracking.accumulatedMs, 2 * 60_000);
+
+  // A short run cannot be refunded more than it actually credited.
+  const w2 = await bootWorker();
+  await configure(w2, { thresholdMinutes: 60, idleSeconds: 180 });
+  w2.env.activeTab = REDDIT;
+  await w2.startup();
+  advance(30_000);
+  w2.env.idleState = "idle";
+  await w2.send("FORCE_TICK");
+  assert.equal((await w2.state()).tracking.accumulatedMs, 0);
+});
+
+test("idle refund: happens once, not for a locked screen, and does not shorten the away-reset time", async (t) => {
+  const advance = useClock(t);
+  const w = await bootWorker();
+  await configure(w, { thresholdMinutes: 60, idleSeconds: 60, awayResetMinutes: 5 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  const tickMinute = async () => { advance(60_000); await w.send("FORCE_TICK"); };
+
+  for (let i = 0; i < 10; i++) await tickMinute(); // 10 min active (one tick per minute)
+  w.env.idleState = "idle";
+  await tickMinute(); // this tick discovers idle: the last 60s are credited, then taken back
+  assert.equal((await w.state()).tracking.accumulatedMs, 10 * 60_000);
+  assert.equal((await w.state()).tracking.awayMs, 0, "the refund does not start the away clock");
+
+  await tickMinute(); // still idle: nothing more is taken back
+  assert.equal((await w.state()).tracking.accumulatedMs, 10 * 60_000, "refunded once only");
+
+  // Progress is erased awayResetMinutes after the idle observation, exactly as before the refund existed.
+  await tickMinute(); await tickMinute(); await tickMinute();
+  assert.equal((await w.state()).tracking.accumulatedMs, 10 * 60_000, "4 min away: kept");
+  await tickMinute();
+  assert.equal((await w.state()).tracking.accumulatedMs, 0, "5 min away: reset");
+
+  // Locking the screen is an action, not a quiet stretch: nothing to refund.
+  const w2 = await bootWorker();
+  await configure(w2, { thresholdMinutes: 60, idleSeconds: 60 });
+  w2.env.activeTab = REDDIT;
+  await w2.startup();
+  for (let i = 0; i < 5; i++) { advance(60_000); await w2.send("FORCE_TICK"); }
+  w2.env.idleState = "locked";
+  advance(60_000);
+  await w2.send("FORCE_TICK");
+  assert.equal((await w2.state()).tracking.accumulatedMs, 6 * 60_000);
+});
+
+test("idle refund cannot reach back past a browser restart", async (t) => {
+  const advance = useClock(t);
+  let w = await bootWorker();
+  await configure(w, { thresholdMinutes: 60, idleSeconds: 180 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  advance(2 * 60_000);
+  await w.send("FORCE_TICK"); // 2 min credited before the browser closed
+
+  advance(60_000); // browser closed for 1 min (under awayResetMinutes): progress kept
+  w = await w.restart();
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  advance(30_000);
+  w.env.idleState = "idle";
+  await w.send("FORCE_TICK"); // the idle lead-in is 180s, but only 30s of this run exists
+  assert.equal((await w.state()).tracking.accumulatedMs, 2 * 60_000, "the run before the restart is untouched");
 });
 
 test("browser in the background (user is in another app) does not count", async (t) => {
@@ -557,6 +640,82 @@ test("snooze: only valid lengths, only while ringing, pauses tracking, then resu
   advance(30_000);
   await w.send("FORCE_TICK");
   assert.equal((await w.state()).tracking.accumulatedMs, 30_000, "tracking resumes after the snooze");
+});
+
+test("snooze: a one-shot alarm resumes tracking at the end of the snooze, with no other event", async (t) => {
+  const advance = useClock(t);
+  const w = await bootWorker();
+  const sender = senders.content();
+  await configure(w, { thresholdMinutes: 1, numQuestions: 1 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  await w.send("FORCE_TRIGGER_ALARM");
+  assert.equal((await w.send("SNOOZE", { minutes: 5 }, sender)).ok, true);
+
+  const wake = await w.chrome.alarms.get("focus-alarm-snooze-end");
+  assert.equal(wake.scheduledTime, Date.now() + 5 * 60_000);
+
+  advance(5 * 60_000);
+  await w.alarmFires("focus-alarm-snooze-end"); // the only event: no tab switch, no tick
+  assert.equal((await w.state()).snooze.snoozeUntil, null);
+  assert.equal(await w.chrome.alarms.get("focus-alarm-snooze-end"), undefined);
+  const threshold = await w.chrome.alarms.get("focus-alarm-threshold");
+  assert.equal(threshold.scheduledTime, Date.now() + 60_000, "the threshold alarm is armed again");
+
+  advance(60_000);
+  await w.alarmFires("focus-alarm-threshold");
+  assert.equal((await w.state()).alarmStatus, "ACTIVE", "the alarm reappears after the snooze");
+});
+
+test("snooze end alarm: re-armed if it fires early, re-created after a restart, removed by the master switch and reset", async (t) => {
+  const advance = useClock(t);
+  let w = await bootWorker();
+  const sender = senders.content();
+  await configure(w, { thresholdMinutes: 1, numQuestions: 1 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  await w.send("FORCE_TRIGGER_ALARM");
+  await w.send("SNOOZE", { minutes: 10 }, sender);
+  const until = (await w.state()).snooze.snoozeUntil;
+
+  advance(10 * 60_000 - 1_000); // the wake-up arrives a second early
+  await w.alarmFires("focus-alarm-snooze-end");
+  assert.equal((await w.state()).snooze.snoozeUntil, until, "still snoozed");
+  assert.equal((await w.chrome.alarms.get("focus-alarm-snooze-end")).scheduledTime, until, "armed again for the real end");
+
+  w = await w.restart(); // new worker, Chrome kept no alarms
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  assert.equal((await w.chrome.alarms.get("focus-alarm-snooze-end")).scheduledTime, until, "re-created on startup");
+
+  assert.equal((await w.send("SET_ENABLED", { enabled: false })).ok, true);
+  assert.equal(await w.chrome.alarms.get("focus-alarm-snooze-end"), undefined, "switching off removes it");
+
+  await w.send("SET_ENABLED", { enabled: true });
+  await w.send("FORCE_TRIGGER_ALARM");
+  await w.send("SNOOZE", { minutes: 5 }, sender);
+  assert.ok(await w.chrome.alarms.get("focus-alarm-snooze-end"));
+  await w.send("RESET_STATE");
+  assert.equal(await w.chrome.alarms.get("focus-alarm-snooze-end"), undefined, "reset removes it");
+});
+
+test("a stale snooze end alarm does nothing while an alarm is ringing, and cleans itself up", async (t) => {
+  const advance = useClock(t);
+  const w = await bootWorker();
+  const sender = senders.content();
+  await configure(w, { thresholdMinutes: 1, numQuestions: 1 });
+  w.env.activeTab = REDDIT;
+  await w.startup();
+  await w.send("FORCE_TRIGGER_ALARM");
+  await w.send("SNOOZE", { minutes: 5 }, sender);
+  await w.send("FORCE_TRIGGER_ALARM"); // the user starts a test alarm during the snooze
+  assert.equal((await w.state()).alarmStatus, "ACTIVE");
+
+  advance(5 * 60_000);
+  await w.alarmFires("focus-alarm-snooze-end"); // the old wake-up still arrives
+  const s = await w.state();
+  assert.equal(s.alarmStatus, "ACTIVE", "the ringing alarm is not disturbed");
+  assert.equal(await w.chrome.alarms.get("focus-alarm-snooze-end"), undefined);
 });
 
 test("snooze limits: per-episode limit holds until a challenge is solved; daily limit resets next day", async (t) => {

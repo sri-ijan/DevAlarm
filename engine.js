@@ -46,6 +46,7 @@ export const DEFAULT_STATE = {
     lastKind: "away", // "countable" | "away" | "paused"
     lastHost: null,
     awayMs: 0,
+    runMs: 0, // length of the current uninterrupted countable run (caps an idle refund)
     byHost: {}
   },
   snooze: { snoozeUntil: null, usedThisEpisode: 0, usedDay: null, usedToday: 0 },
@@ -151,7 +152,7 @@ export function classify(input) {
 }
 
 export function freshTracking(now, kind = "paused") {
-  return { accumulatedMs: 0, lastObservedAt: now, lastKind: kind, lastHost: null, awayMs: 0, byHost: {} };
+  return { accumulatedMs: 0, lastObservedAt: now, lastKind: kind, lastHost: null, awayMs: 0, runMs: 0, byHost: {} };
 }
 
 /** Origin match patterns Chrome needs for a site (covers the bare domain and subdomains). */
@@ -264,6 +265,7 @@ export function sanitizeState(raw) {
       lastKind: ["countable", "away", "paused"].includes(t.lastKind) ? t.lastKind : d.tracking.lastKind,
       lastHost: typeof t.lastHost === "string" ? t.lastHost : null,
       awayMs: nonNegInt(t.awayMs),
+      runMs: nonNegInt(t.runMs),
       byHost
     },
     snooze: {
@@ -308,7 +310,13 @@ export function sanitizeState(raw) {
  * because any change of state produces an event and therefore a new observation.
  * That makes the result independent of how often or how late callbacks run.
  *
- * obs = { kind: "countable" | "away" | "paused", hostname: string | null }
+ * obs = { kind: "countable" | "away" | "paused", hostname: string | null, idleRefundMs?: number }
+ *
+ * `idleRefundMs` is set when this observation is the one that discovered the user went idle.
+ * Chrome only reports "idle" after `idleSeconds` without input, so that stretch was already
+ * credited as active. It is taken back, limited to what was really credited in the current
+ * uninterrupted countable run. The refund does NOT start the "away" clock: how long idleness
+ * takes to erase progress (awayResetMinutes) is unchanged by this.
  */
 export function advanceTracking(tracking, obs, now, settings) {
   const t = { ...tracking, byHost: { ...tracking.byHost } };
@@ -318,8 +326,20 @@ export function advanceTracking(tracking, obs, now, settings) {
 
   if (t.lastKind === "countable") {
     t.accumulatedMs += elapsed;
+    t.runMs = (t.runMs || 0) + elapsed;
     t.awayMs = 0;
     if (t.lastHost) t.byHost[t.lastHost] = (t.byHost[t.lastHost] || 0) + elapsed;
+    if (obs.kind === "away" && obs.idleRefundMs > 0) {
+      // Part of a very long gap may never have been credited (MAX_CREDIT_GAP_MS). The idle
+      // window is the END of the gap, so only the credited share that overlaps it is handed back.
+      const uncredited = raw > elapsed ? raw - elapsed : 0;
+      const refund = Math.min(Math.max(0, obs.idleRefundMs - uncredited), t.runMs, t.accumulatedMs);
+      t.accumulatedMs -= refund;
+      if (t.lastHost && t.byHost[t.lastHost] != null) {
+        t.byHost[t.lastHost] = Math.max(0, t.byHost[t.lastHost] - refund);
+        if (t.byHost[t.lastHost] === 0) delete t.byHost[t.lastHost];
+      }
+    }
   } else if (t.lastKind === "away") {
     t.awayMs += elapsed;
     if (t.awayMs >= settings.awayResetMinutes * 60000) {
@@ -328,6 +348,7 @@ export function advanceTracking(tracking, obs, now, settings) {
     }
   } // "paused": time is credited to nothing
 
+  if (obs.kind !== "countable") t.runMs = 0;
   t.lastObservedAt = now;
   t.lastKind = obs.kind;
   t.lastHost = obs.kind === "countable" ? obs.hostname : null;

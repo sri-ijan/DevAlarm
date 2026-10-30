@@ -68,9 +68,11 @@
   <p class="hint">Auto-refreshes every second. This shows what the background script is actually seeing right now.</p>
   <p class="hint" style="color:#facc15;">⚠️ While THIS tab/window is the one you're looking at, it counts as the active tab (tracking pauses — it won't reset your progress, but it also can't show you another tab's live status). To watch a distracting site's status update in real time, open this debug page in a <b>separate window</b>, drag it to one side, then click into your other window (e.g. YouTube) to give that one focus — this window will keep refreshing without needing your click.</p>
 
+  <div class="row"><span class="label">Scheduled alarms</span><span class="value" id="alarms-list">-</span></div>
+  <div class="row"><span class="label">Last error</span><span class="value" id="last-error">-</span></div>
   <div class="row"><span class="label">Alarm status</span><span class="value" id="alarm-status">-</span></div>
-  <div class="row"><span class="label">Offscreen keepalive</span><span class="value" id="offscreen-status">-</span></div>
-  <div class="row"><span class="label">Last background tick</span><span class="value" id="last-tick">-</span></div>
+  <div class="row"><span class="label">Question bank</span><span class="value" id="bank-status">-</span></div>
+  <div class="row"><span class="label">Last observation</span><span class="value" id="last-tick">-</span></div>
   <div class="row"><span class="label">Active tab</span><span class="value" id="active-tab">-</span></div>
   <div class="row"><span class="label">Counts as distracting?</span><span class="value" id="is-distracting">-</span></div>
   <div class="row"><span class="label">Idle right now?</span><span class="value" id="is-idle">-</span></div>
@@ -81,8 +83,8 @@
   <div class="row"><span class="label">Accumulated / Threshold</span><span class="value" id="accumulated">-</span></div>
 
   <div class="row"><span class="label">Snooze active?</span><span class="value" id="snooze-status">-</span></div>
-  <div class="row"><span class="label">Snoozes used this alarm</span><span class="value" id="snoozes-used">-</span></div>
-  <div class="row"><span class="label">Focus session</span><span class="value" id="focus-session">-</span></div>
+  <div class="row"><span class="label">Snoozes used (since last solve)</span><span class="value" id="snoozes-used">-</span></div>
+  <div class="row"><span class="label">Break (study mode)</span><span class="value" id="focus-session">-</span></div>
 
   <div class="actions">
     <button id="force-tick-btn">Force tick now</button>

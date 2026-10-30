@@ -17,47 +17,64 @@ function setValue(id, text, cls) {
   el.className = "value" + (cls ? " " + cls : "");
 }
 
+// Problems with the page itself (a refused request, or this file disagreeing with the shape
+// background.js returns) are shown on the page. Before, an exception here only reached the
+// console and the page just kept showing "-", which looks like "the extension is not working".
+function showProblem(text) {
+  const el = document.getElementById("alarm-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "value bad";
+}
+
 async function refresh() {
+  try {
+    await render();
+  } catch (e) {
+    console.error("[FocusAlarm debug] render failed:", e);
+    showProblem(`Debug page error: ${(e && e.message) || e}. Is debug.js from the same version as background.js?`);
+  }
+}
+
+async function render() {
   const info = await chrome.runtime.sendMessage({ type: "GET_DEBUG_INFO" });
-  if (!info) return;
+  if (!info || info.ok === false) {
+    showProblem(`Background did not return debug info: ${(info && info.reason) || "no reply"}`);
+    return;
+  }
 
   setValue("alarm-status", info.alarmStatus, info.alarmStatus === "ACTIVE" ? "bad" : "good");
 
-  if (info.offscreenActive) {
-    setValue("offscreen-status", "ACTIVE", "good");
-  } else if (info.offscreenError) {
-    setValue("offscreen-status", `FAILED — ${info.offscreenError}`, "bad");
+  if (info.bank.ok) setValue("bank-status", `${info.bank.count} questions loaded`, "good");
+  else setValue("bank-status", `FAILED: ${info.bank.error}`, "bad");
+
+  setValue("last-error", info.lastError || "none", info.lastError ? "bad" : "good");
+  setValue(
+    "alarms-list",
+    info.alarms.length
+      ? info.alarms.map((a) => `${a.name} in ${fmtSeconds(Math.max(0, a.scheduledTime - info.now))}`).join(", ")
+      : "none",
+    info.alarms.length ? "good" : "bad"
+  );
+
+  const obs = info.lastObservation;
+  if (obs) {
+    const secondsAgo = Math.round((info.now - obs.at) / 1000);
+    setValue("last-tick", `${secondsAgo}s ago (${obs.why})`, secondsAgo > 120 ? "bad" : "good");
+    setValue("active-tab", obs.hostname || "(none / internal page)");
+    const label = { countable: "YES, counting", away: "no", paused: "paused" }[obs.kind] || obs.kind;
+    setValue("is-distracting", `${label} (${obs.reason})`, obs.kind === "countable" ? "bad" : "good");
+    setValue("is-idle", obs.idleState === "active" ? "no (active)" : `YES (${obs.idleState})`, obs.idleState === "active" ? "good" : "neutral");
   } else {
-    setValue("offscreen-status", "MISSING", "bad");
+    setValue("last-tick", "none yet. Click \"Force tick now\"", "neutral");
   }
-
-  if (info.distraction.lastTickAt) {
-    const secondsAgo = Math.round((info.now - info.distraction.lastTickAt) / 1000);
-    const stale = secondsAgo > 30; // heartbeat runs every ~10s, so this should almost never be high
-    setValue("last-tick", `${secondsAgo}s ago`, stale ? "bad" : "good");
-  } else {
-    setValue("last-tick", "never yet", "neutral");
-  }
-
-  setValue("active-tab", info.hostname || "(internal page)");
-
-  if (info.distractionReason === "internal") {
-    setValue("is-distracting", "paused (viewing this debug/popup page)", "neutral");
-  } else if (info.isDistracting) {
-    setValue("is-distracting", "YES", "bad");
-  } else if (info.distractionReason === "study-channel") {
-    setValue("is-distracting", "no (recognized study channel)", "good");
-  } else {
-    setValue("is-distracting", "no", "good");
-  }
-
-  setValue("is-idle", info.idle ? "YES (idle)" : "no (active)", info.idle ? "neutral" : "good");
-  setValue("yt-channel", info.youtubeChannelForActiveTab || "(none detected)");
+  setValue("yt-channel", (obs && obs.channel) || "(none detected)");
 
   const thresholdMs = info.thresholdMinutes * 60 * 1000;
-  const pct = Math.min(100, Math.round((info.distraction.accumulatedMs / thresholdMs) * 100));
+  const acc = info.tracking.accumulatedMs;
+  const pct = Math.min(100, Math.round((acc / thresholdMs) * 100));
   document.getElementById("progress-bar").style.width = pct + "%";
-  setValue("accumulated", `${fmtSeconds(info.distraction.accumulatedMs)} / ${info.thresholdMinutes}m (${pct}%)`);
+  setValue("accumulated", `${fmtSeconds(acc)} / ${info.thresholdMinutes}m (${pct}%)`);
 
   const snoozeActive = info.snooze.snoozeUntil && info.now < info.snooze.snoozeUntil;
   setValue(
@@ -65,13 +82,13 @@ async function refresh() {
     snoozeActive ? `active, ${fmtSeconds(info.snooze.snoozeUntil - info.now)} left` : "not snoozed",
     snoozeActive ? "neutral" : "good"
   );
-  setValue("snoozes-used", String(info.snooze.snoozesUsedThisAlarm));
+  setValue("snoozes-used", String(info.snooze.usedThisEpisode));
 
-  const sessionActive = info.focusSession.active && info.focusSession.endsAt > info.now;
+  const studying = info.studyMode.until && info.studyMode.until > info.now;
   setValue(
     "focus-session",
-    sessionActive ? `running, ${fmtSeconds(info.focusSession.endsAt - info.now)} left` : "not running",
-    sessionActive ? "neutral" : "good"
+    studying ? `on, ${fmtSeconds(info.studyMode.until - info.now)} left` : "off",
+    studying ? "neutral" : "good"
   );
 }
 

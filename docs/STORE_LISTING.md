@@ -6,7 +6,7 @@ Status: **draft material only. Nothing has been submitted and no approval exists
 
 > Focus Alarm interrupts time spent on distracting websites you choose, with a full-screen alarm that is dismissed by solving a few short coding questions.
 
-Keep every feature tied to this. Study mode, snoozes and YouTube study channels all exist to make that one purpose usable, which is how to describe them if asked.
+Keep every feature tied to this. Taking a break, snoozes and YouTube study channels all exist to make that one purpose usable, which is how to describe them if asked.
 
 ## 2. Listing text
 
@@ -22,7 +22,7 @@ Keep every feature tied to this. Study mode, snoozes and YouTube study channels 
 > You choose the distracting sites and a time limit. When you reach it, a full-screen alarm covers the page until you solve a few short programming and computer-science questions (data structures, algorithms, complexity, operating systems, databases, networking and more). Multiple choice and fill in the blank, easy to hard, 120 questions.
 >
 > - You pick the sites, the time limit and the number of questions.
-> - Study mode pauses tracking for 15 to 60 minutes.
+> - Take a break pauses tracking for 15 to 60 minutes.
 > - YouTube study channels never count as distraction.
 > - Snooze a limited number of times if you really need to.
 > - One big switch in the popup turns everything off at any moment. It is a commitment device, not a lock.
@@ -82,7 +82,7 @@ Screenshots to capture (real product, real pages, no fake UI, no third-party log
 
 1. The alarm overlay over a page, multiple choice question visible. Caption: "Solve a few questions to get back to your tab."
 2. The alarm with a fill-in-the-blank question.
-3. The popup: alarm ON, status line, study mode card.
+3. The popup: alarm ON, status line, take-a-break card.
 4. The popup settings: sites, threshold, number of questions.
 5. The welcome page: blocklist, privacy and turning it off.
 
