@@ -18,7 +18,7 @@
   <main id="main">
     <section class="step" aria-labelledby="h-quick">
       <h2 id="h-quick">Quick start</h2>
-      <p class="help">You only need two things. <strong>1.</strong> Check the list of sites in step 1 (the defaults are fine). <strong>2.</strong> Click <strong>Allow all sites</strong> in step 4, then <strong>Save and finish</strong> at the bottom. Nothing is tracked until you allow site access. Everything else already has a sensible default and you can change it later in the popup.</p>
+      <p class="help">You only need two things. <strong>1.</strong> Check the list of sites in step 1 (the defaults are fine). <strong>2.</strong> Click <strong>Allow all sites</strong> in step 4, then <strong>Save settings</strong> at the bottom. Nothing is tracked until you allow site access. Everything else already has a sensible default. You can come back to this page any time from the popup's <strong>Settings</strong> link.</p>
     </section>
 
     <section class="step" aria-labelledby="h-sites">
@@ -86,8 +86,47 @@
       </ul>
     </section>
 
+    <details class="step more" id="more">
+      <summary>More settings (optional)</summary>
+
+      <h3>YouTube study channels</h3>
+      <p class="help">Channel names you count as studying. Time on these never counts as distraction. One per line, at least 3 characters.</p>
+      <label class="sr-only" for="channels">YouTube study channels, one per line</label>
+      <textarea id="channels" rows="3" spellcheck="false" autocomplete="off"></textarea>
+
+      <h3>Questions and snoozes</h3>
+      <div class="field">
+        <label for="difficulty">Difficulty</label>
+        <select id="difficulty">
+          <option value="mixed">Mixed</option>
+          <option value="easy">Easy</option>
+          <option value="medium">Medium</option>
+          <option value="hard">Hard</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="snoozes">Snoozes in a row</label>
+        <input id="snoozes" type="number" min="0" max="10" inputmode="numeric" />
+      </div>
+      <div class="field">
+        <label for="daily-snooze">Daily snooze limit (0 = no limit)</label>
+        <input id="daily-snooze" type="number" min="0" max="50" inputmode="numeric" />
+      </div>
+
+      <h3>Topics</h3>
+      <p class="help">Leave all unchecked to allow every topic.</p>
+      <div id="topics-list" class="topics" role="group" aria-label="Topics"></div>
+
+      <h3>Tools</h3>
+      <div class="tools">
+        <button id="test-lock-btn" class="btn" type="button">Test alarm now</button>
+        <button id="debug-btn" class="btn" type="button">Debug panel</button>
+      </div>
+      <p id="tools-msg" class="note" role="status" aria-live="polite"></p>
+    </details>
+
     <div class="finish">
-      <button id="finish" class="btn primary big" type="button">Save and finish</button>
+      <button id="finish" class="btn primary big" type="button">Save settings</button>
       <p id="finish-msg" class="note" role="status" aria-live="polite"></p>
     </div>
   </main>

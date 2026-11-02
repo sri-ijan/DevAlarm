@@ -101,7 +101,7 @@ code {
 }
 strong { color: var(--text); }
 
-textarea, input[type="number"] {
+textarea, input[type="number"], select {
   width: 100%;
   padding: 10px 12px;
   background: var(--bg);
@@ -112,7 +112,8 @@ textarea, input[type="number"] {
   font-size: 15px;
 }
 input[type="number"] { width: 96px; text-align: right; font-family: inherit; }
-textarea:focus, input:focus { outline: 2px solid var(--amber); outline-offset: 1px; border-color: var(--amber); }
+select { width: auto; min-width: 120px; font-family: inherit; }
+textarea:focus, input:focus, select:focus { outline: 2px solid var(--amber); outline-offset: 1px; border-color: var(--amber); }
 
 .field {
   display: flex;
@@ -165,6 +166,21 @@ ul.plain li { margin: 6px 0; }
 .btn.big { width: 100%; padding: 14px; font-size: 17px; }
 .btn:disabled { opacity: 0.6; cursor: default; }
 :focus-visible { outline: 2px solid var(--amber-hi); outline-offset: 2px; }
+
+.more > summary {
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+.more[open] > summary { margin-bottom: 10px; }
+.more h3 { margin: 18px 0 6px; }
+.more .field:last-of-type { margin-bottom: 0; }
+.topics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
+@media (max-width: 520px) { .topics { grid-template-columns: 1fr; } }
+.topics label { display: flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer; }
+.topics input { accent-color: var(--amber); width: 18px; height: 18px; margin: 0; }
+.tools { display: flex; gap: 10px; flex-wrap: wrap; }
 
 .finish { margin-top: 18px; }
 

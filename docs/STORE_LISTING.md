@@ -83,7 +83,7 @@ Screenshots to capture (real product, real pages, no fake UI, no third-party log
 1. The alarm overlay over a page, multiple choice question visible. Caption: "Solve a few questions to get back to your tab."
 2. The alarm with a fill-in-the-blank question.
 3. The popup: alarm ON, status line, take-a-break card.
-4. The popup settings: sites, threshold, number of questions.
+4. The Settings page (welcome.html): sites, threshold, number of questions, site access.
 5. The welcome page: blocklist, privacy and turning it off.
 
 Capture method: browser window 1280 x 800, 100% zoom, light desktop clutter hidden. Do not show your own history, tabs or email. I generated working-quality dev screenshots during testing, but they use a fake page named "Pretend feed" and are not suitable for the store.

@@ -227,4 +227,12 @@ select:focus {
 .footer-actions { display: flex; gap: 8px; margin-top: 10px; }
 .footer-actions .btn { flex: 1; }
 
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }

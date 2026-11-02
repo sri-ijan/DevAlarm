@@ -1,30 +1,9 @@
 // popup.js
-// Runs when the user clicks the extension icon.
+// Runs when the user clicks the extension icon. Deliberately small: the master switch, one status
+// line, a break button and a link to the Settings page. Every setting lives in welcome.html.
 //
 // The big power button is the master switch (settings.enabled, owned by background.js).
-// When it is off, #main-content (timer, stats, every setting) is hidden and only the
-// switch and a short "paused" note remain.
-
-const ALL_TOPICS = [
-  { id: "arrays", label: "Arrays" },
-  { id: "strings", label: "Strings" },
-  { id: "linkedlist", label: "Linked List" },
-  { id: "stacks-queues", label: "Stacks & Queues" },
-  { id: "sorting", label: "Sorting" },
-  { id: "recursion", label: "Recursion" },
-  { id: "hashmaps", label: "Hash Maps" },
-  { id: "two-pointers", label: "Two Pointers" },
-  { id: "binary-search", label: "Binary Search" },
-  { id: "trees", label: "Trees" },
-  { id: "dp", label: "Dynamic Programming" },
-  { id: "graphs", label: "Graphs" },
-  { id: "complexity", label: "Complexity" },
-  { id: "oop", label: "OOP" },
-  { id: "os", label: "Operating Systems" },
-  { id: "dbms", label: "Databases" },
-  { id: "networking", label: "Networking" },
-  { id: "language-concepts", label: "Language Concepts" }
-];
+// When it is off, #main-content is hidden and only the switch and a short "paused" note remain.
 
 const powerBtn = document.getElementById("power-btn");
 const powerTitle = document.getElementById("power-title");
@@ -36,60 +15,15 @@ const statusText = document.getElementById("status-text");
 const statsText = document.getElementById("stats-text");
 const focusDurationEl = document.getElementById("focus-duration");
 const startFocusBtn = document.getElementById("start-focus-btn");
-const sitesInputEl = document.getElementById("sites-input");
-const channelsInputEl = document.getElementById("channels-input");
-const thresholdInputEl = document.getElementById("threshold-input");
-const numqInputEl = document.getElementById("numq-input");
-const difficultyInputEl = document.getElementById("difficulty-input");
-const topicsListEl = document.getElementById("topics-list");
-const snoozesInputEl = document.getElementById("snoozes-input");
-const dailySnoozeInputEl = document.getElementById("daily-snooze-input");
-const saveBtn = document.getElementById("save-btn");
-const saveConfirm = document.getElementById("save-confirm");
-const testLockBtn = document.getElementById("test-lock-btn");
-const debugBtn = document.getElementById("debug-btn");
-const modeButtons = document.querySelectorAll(".mode-btn");
-const accessLine = document.getElementById("access-line");
 const setupCard = document.getElementById("setup-card");
 const setupText = document.getElementById("setup-text");
 const setupBtn = document.getElementById("setup-btn");
 const setupLink = document.getElementById("setup-link");
 
 let enabled = true;
-let formLoaded = false; // fill the form once, so the periodic refresh never overwrites typing
-
-// ---------- topic checkboxes ----------
-ALL_TOPICS.forEach((topic) => {
-  const label = document.createElement("label");
-  const checkbox = document.createElement("input");
-  checkbox.type = "checkbox";
-  checkbox.value = topic.id;
-  checkbox.id = `topic-${topic.id}`;
-  label.appendChild(checkbox);
-  label.append(topic.label);
-  topicsListEl.appendChild(label);
-});
 
 const getSettings = () => chrome.runtime.sendMessage({ type: "GET_SETTINGS" });
 const getState = () => chrome.runtime.sendMessage({ type: "GET_STATE" });
-
-// ---------- challenge-count presets ----------
-function highlightModeButton(count) {
-  modeButtons.forEach((btn) => {
-    btn.classList.toggle("active", parseInt(btn.dataset.count, 10) === count);
-  });
-}
-
-modeButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    numqInputEl.value = btn.dataset.count;
-    highlightModeButton(parseInt(btn.dataset.count, 10));
-  });
-});
-
-numqInputEl.addEventListener("input", () => {
-  highlightModeButton(parseInt(numqInputEl.value, 10));
-});
 
 // ---------- rendering ----------
 function renderPower(state) {
@@ -109,6 +43,10 @@ function renderPower(state) {
 
   mainContent.hidden = !enabled;
   offPanel.hidden = enabled;
+}
+
+function studyActive(state) {
+  return !!(state.studyMode && state.studyMode.until && state.studyMode.until > Date.now());
 }
 
 function renderStatus(settings, state) {
@@ -132,34 +70,8 @@ function renderStatus(settings, state) {
   if (state.lastError) statsText.textContent += `  ·  Note: ${state.lastError}`;
 }
 
-function studyActive(state) {
-  return !!(state.studyMode && state.studyMode.until && state.studyMode.until > Date.now());
-}
-
-function fillForm(settings) {
-  ALL_TOPICS.forEach((topic) => {
-    document.getElementById(`topic-${topic.id}`).checked = settings.topics.includes(topic.id);
-  });
-
-  sitesInputEl.value = settings.distractingSites.join("\n");
-  channelsInputEl.value = settings.studyChannels.join("\n");
-  thresholdInputEl.value = settings.thresholdMinutes;
-  numqInputEl.value = settings.numQuestions;
-  difficultyInputEl.value = settings.difficulty;
-  snoozesInputEl.value = settings.maxSnoozes;
-  dailySnoozeInputEl.value = settings.dailySnoozeLimit;
-  highlightModeButton(settings.numQuestions);
-}
-
+// The setup card only appears when something needs doing: site access missing, or first run not finished.
 function renderAccess(access, onboarding) {
-  const label = {
-    all: "Overlay shows on: every tab",
-    sites: "Overlay shows on: your listed sites only",
-    partial: "Overlay shows on: part of your list",
-    none: "Site access: not granted"
-  }[access.scope];
-  accessLine.textContent = label;
-
   let text = "";
   if (access.scope === "none") {
     text = "Focus Alarm cannot see which site you are on yet, so nothing is tracked. Choose what to allow.";
@@ -179,10 +91,6 @@ async function refresh() {
   renderPower(state);
 
   if (enabled) {
-    if (!formLoaded) {
-      fillForm(settings);
-      formLoaded = true;
-    }
     renderStatus(settings, state);
     const [access, onboarding] = await Promise.all([
       chrome.runtime.sendMessage({ type: "GET_ACCESS" }),
@@ -205,7 +113,7 @@ powerBtn.addEventListener("click", async () => {
   await refresh();
 });
 
-// ---------- actions ----------
+// ---------- break ----------
 startFocusBtn.addEventListener("click", async () => {
   const state = await getState();
   if (studyActive(state)) {
@@ -217,47 +125,17 @@ startFocusBtn.addEventListener("click", async () => {
   refresh();
 });
 
-saveBtn.addEventListener("click", async () => {
-  const selectedTopics = ALL_TOPICS
-    .filter((topic) => document.getElementById(`topic-${topic.id}`).checked)
-    .map((topic) => topic.id);
-
-  const toLines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
-
-  const newSettings = {
-    topics: selectedTopics, // empty = allow all
-    distractingSites: toLines(sitesInputEl.value),
-    studyChannels: toLines(channelsInputEl.value),
-    thresholdMinutes: Math.max(1, parseInt(thresholdInputEl.value, 10) || 20),
-    numQuestions: Math.max(1, parseInt(numqInputEl.value, 10) || 1),
-    difficulty: difficultyInputEl.value,
-    maxSnoozes: Math.max(0, parseInt(snoozesInputEl.value, 10) || 0),
-    dailySnoozeLimit: Math.max(0, parseInt(dailySnoozeInputEl.value, 10) || 0)
-  };
-
-  // The master switch is deliberately not part of this payload (background.js ignores it here).
-  await chrome.runtime.sendMessage({ type: "SET_SETTINGS", settings: newSettings });
-
-  saveConfirm.hidden = false;
-  setTimeout(() => (saveConfirm.hidden = true), 1500);
-  refresh();
-});
-
-testLockBtn.addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "FORCE_TRIGGER_ALARM" });
-  window.close(); // so the overlay is visible on the current tab straight away
-});
-
+// ---------- settings ----------
 function openSetup(event) {
   if (event) event.preventDefault();
   // Permission prompts need a full tab: a popup can close the moment Chrome shows its dialog.
   chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html#access") });
 }
 setupBtn.addEventListener("click", openSetup);
-setupLink.addEventListener("click", openSetup);
 
-debugBtn.addEventListener("click", () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL("debug.html") });
+setupLink.addEventListener("click", (event) => {
+  event.preventDefault();
+  chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
 });
 
 refresh();

@@ -18,7 +18,50 @@ const finishMsg = $("finish-msg");
 const grantAllBtn = $("grant-all");
 const grantSitesBtn = $("grant-sites");
 
+const channelsEl = $("channels");
+const difficultyEl = $("difficulty");
+const snoozesEl = $("snoozes");
+const dailySnoozeEl = $("daily-snooze");
+const topicsListEl = $("topics-list");
+const testLockBtn = $("test-lock-btn");
+const debugBtn = $("debug-btn");
+const toolsMsg = $("tools-msg");
+
 const send = (message) => chrome.runtime.sendMessage(message);
+
+const ALL_TOPICS = [
+  { id: "arrays", label: "Arrays" },
+  { id: "strings", label: "Strings" },
+  { id: "linkedlist", label: "Linked List" },
+  { id: "stacks-queues", label: "Stacks & Queues" },
+  { id: "sorting", label: "Sorting" },
+  { id: "recursion", label: "Recursion" },
+  { id: "hashmaps", label: "Hash Maps" },
+  { id: "two-pointers", label: "Two Pointers" },
+  { id: "binary-search", label: "Binary Search" },
+  { id: "trees", label: "Trees" },
+  { id: "dp", label: "Dynamic Programming" },
+  { id: "graphs", label: "Graphs" },
+  { id: "complexity", label: "Complexity" },
+  { id: "oop", label: "OOP" },
+  { id: "os", label: "Operating Systems" },
+  { id: "dbms", label: "Databases" },
+  { id: "networking", label: "Networking" },
+  { id: "language-concepts", label: "Language Concepts" }
+];
+
+ALL_TOPICS.forEach((topic) => {
+  const label = document.createElement("label");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.value = topic.id;
+  checkbox.id = `topic-${topic.id}`;
+  label.appendChild(checkbox);
+  label.append(topic.label);
+  topicsListEl.appendChild(label);
+});
+
+const toLines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
 
 function parsedSites() {
   const seen = new Set();
@@ -100,7 +143,12 @@ finishBtn.addEventListener("click", async () => {
     settings: {
       distractingSites: valid,
       thresholdMinutes: Math.max(1, parseInt(thresholdEl.value, 10) || 20),
-      numQuestions: Math.max(1, parseInt(numqEl.value, 10) || 1)
+      numQuestions: Math.max(1, parseInt(numqEl.value, 10) || 1),
+      topics: ALL_TOPICS.filter((t) => $(`topic-${t.id}`).checked).map((t) => t.id), // empty = every topic
+      studyChannels: toLines(channelsEl.value),
+      difficulty: difficultyEl.value,
+      maxSnoozes: Math.max(0, parseInt(snoozesEl.value, 10) || 0),
+      dailySnoozeLimit: Math.max(0, parseInt(dailySnoozeEl.value, 10) || 0)
     }
   });
   await send({ type: "FINISH_ONBOARDING" });
@@ -114,9 +162,18 @@ finishBtn.addEventListener("click", async () => {
   } else if (access.scope === "partial") {
     finishMsg.textContent = `Saved. These sites are not allowed yet, so they will not be tracked: ${access.missingSites.join(", ")}.`;
   } else {
-    finishMsg.textContent = "All set. You can close this tab. Open the Focus Alarm icon any time to change settings.";
+    finishMsg.textContent = "All set. You can close this tab. To change anything later, click the Focus Alarm icon, then Settings.";
   }
   await renderAccess();
+});
+
+testLockBtn.addEventListener("click", async () => {
+  await send({ type: "FORCE_TRIGGER_ALARM" });
+  toolsMsg.textContent = "Test alarm started. Switch to another tab to see it (it does not appear on this page).";
+});
+
+debugBtn.addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL("debug.html") });
 });
 
 sitesEl.addEventListener("input", renderCount);
@@ -128,6 +185,11 @@ chrome.permissions.onRemoved.addListener(renderAccess);
   sitesEl.value = settings.distractingSites.join("\n");
   thresholdEl.value = settings.thresholdMinutes;
   numqEl.value = settings.numQuestions;
+  channelsEl.value = settings.studyChannels.join("\n");
+  difficultyEl.value = settings.difficulty;
+  snoozesEl.value = settings.maxSnoozes;
+  dailySnoozeEl.value = settings.dailySnoozeLimit;
+  ALL_TOPICS.forEach((t) => { $(`topic-${t.id}`).checked = settings.topics.includes(t.id); });
   renderCount();
   await renderAccess();
   if (location.hash === "#access") $("h-access").scrollIntoView();

@@ -72,13 +72,15 @@ Then open `chrome://extensions`, enable Developer mode, click **Load unpacked**,
 
 ## How to Use
 
-1. Click the Focus Alarm icon in Chrome.
+1. After installing, the **welcome page** opens. (Later: click the Focus Alarm icon, then **Settings**.)
 2. Add the websites you tend to get distracted by, such as `youtube.com` or `reddit.com`.
-3. Select the desired site-access scope and grant access.
-4. Set the number of distracted minutes before an alarm triggers.
-5. Choose your preferred topics, difficulty, and number of questions.
+3. Set the number of distracted minutes before an alarm triggers, and how many questions to solve.
+4. Click **Allow all sites** (or **Allow only my list**) to grant site access. Nothing is tracked until you do.
+5. Optional: open **More settings** for topics, difficulty, YouTube study channels and snooze limits.
 6. Click **Save settings**.
 7. Browse normally. When your configured threshold is reached, the challenge overlay should appear.
+
+The toolbar popup is intentionally small: the on/off switch, your progress, and a **Take a break** button. Every other setting is on the Settings page.
 
 ### Available settings
 
@@ -91,11 +93,11 @@ Then open `chrome://extensions`, enable Developer mode, click **Load unpacked**,
 | Topics | Select which subjects can appear. Leaving all unchecked uses all topics. |
 | Difficulty | Choose mixed, easy, medium, or hard. |
 | YouTube study channels | Add channel names that should count as studying. |
-| Take a break | Pause tracking for a set time. |
+| Take a break | Pause tracking for a set time (the only setting in the popup besides the on/off switch). |
 | Max snoozes in a row | Set how many times an alarm can be snoozed before a question must be solved. |
 | Daily snooze limit | Optionally limit snoozes per day. |
 
-After changing settings, click **Save settings**.
+Settings are on the Settings page (popup, then **Settings**). After changing them, click **Save settings**.
 
 ### What happens when an alarm appears?
 
@@ -211,8 +213,8 @@ focus-alarm-extension/
 - `engine.js` — Tracking logic, classification, snoozing, questions, and validation.
 - `background.js` — Service worker, Chrome events, timers, and alarms.
 - `content-script.js` — Challenge overlay and page interaction.
-- `popup.*` — Extension popup and settings.
-- `welcome.*` — First-run setup and site-access controls.
+- `popup.*` — Minimal toolbar popup: on/off switch, status, take a break, link to Settings.
+- `welcome.*` — First-run setup and the Settings page: sites, limits, site access, topics, difficulty, study channels, snoozes.
 - `data/questions.json` — Question bank.
 - `tests/` — Automated tests and Chrome API mocks.
 - `docs/` — Testing, privacy, and release-related documentation.
